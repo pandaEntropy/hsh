@@ -6,13 +6,20 @@
 
 #define MSH_RD_BUFSIZE 1024
 #define MSH_TOK_BUFSIZE 64
-#define MSH_TOK_DELIM [" \t\r\n\a"]
+#define MSH_TOK_DELIM " \t\r\n\a"
 
 void msh_loop();
 char *msh_read_line();
 char **msh_split_line(char *line);
+int msh_cd(char **args);
+int msh_help(char **args);
+int msh_exit(char **args);
+int msh_execute_line(char **args);
 
-int main(int argc, char **argv) {
+char *builtin_str[] = {"cd", "help", "exit"};
+int (*builtin_func[]) (char **) = {msh_cd,  msh_help, msh_exit};
+
+int main(){
     
     msh_loop();
     
@@ -75,8 +82,6 @@ char *msh_read_line(){
     }  
 }
 
-
-
 char **msh_split_line(char *line){
     
     int bufsize = MSH_TOK_BUFSIZE; //Amount of arguments
@@ -85,7 +90,7 @@ char **msh_split_line(char *line){
     char *token;
 
     if(!tokens){
-        fprintf("msh: allocation error\n");
+        fprintf(stderr, "msh: allocation error\n");
         exit(EXIT_FAILURE);
     }
 
@@ -97,7 +102,7 @@ char **msh_split_line(char *line){
 
         if(position >= bufsize){
             bufsize = MSH_TOK_BUFSIZE;
-            char *temp = realloc(tokens, bufsize * sizeof(char*));
+            char **temp = realloc(tokens, bufsize * sizeof(char*));
             if(!temp){
                 fprintf(stderr, "msh: allocation error\n");
                 exit(EXIT_FAILURE);
@@ -137,4 +142,50 @@ int msh_launch(char **args){
     
     return 1;
     
+}
+
+int msh_num_builtins(){
+    return sizeof(builtin_str) / sizeof(char*);
+}
+
+int msh_cd(char **args){
+    if(args[0] == NULL){
+        fprintf(stderr, "msh: expected argument to \"cd\"\n");
+    }
+    else{
+        if(chdir(args[1]) != 0){
+            perror("msh");
+        }
+    }
+    return 1;
+}
+
+int msh_help(char **args){
+    printf("This is my first shell: MSH\n");
+    printf("Type commands and hit enter.\n");
+    printf("The following commands are built in:\n");
+
+    for(int i = 0; i < msh_num_builtins(); i++){
+        printf(" %s\n", builtin_str[i]);
+    }
+
+    return 1;
+}
+
+int msh_exit(char **args){
+    return 0;
+}
+
+int msh_execute_line(char **args){
+    if(args[0] == NULL){
+        return 1;
+    }
+
+    for(int i = 0; i < msh_num_builtins(); i++){
+        if(strcmp(args[0], builtin_str[i]) == 0){
+            return builtin_func[i](args);
+        }
+    }
+
+    return msh_launch(args);
 }
