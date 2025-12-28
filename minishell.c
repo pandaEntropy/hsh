@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define MSH_RD_BUFSIZE 1024
 #define MSH_TOK_BUFSIZE 64
@@ -37,7 +39,7 @@ void msh_loop(){
 
 char *msh_read_line(){
 
-    int bufsize = MSH_RD_BUFSIZE;
+    int bufsize = MSH_RD_BUFSIZE; //Amount of characters
     int position = 0;
     char *buffer = malloc(sizeof(char) * bufsize);
     int c;
@@ -77,7 +79,7 @@ char *msh_read_line(){
 
 char **msh_split_line(char *line){
     
-    int bufsize = MSH_TOK_BUFSIZE;
+    int bufsize = MSH_TOK_BUFSIZE; //Amount of arguments
     int position = 0;
     char **tokens = malloc(bufsize * sizeof(char*));
     char *token;
@@ -109,4 +111,30 @@ char **msh_split_line(char *line){
     tokens[position] = NULL;
     return tokens;
 
+}
+
+int msh_launch(char **args){
+
+    pid_t pid, wpid;
+    int status;
+
+    pid = fork();
+    if(pid == 0){
+        //Child process
+        if(execvp(args[0], args) == -1){
+            perror("msh");
+        }
+        exit(EXIT_FAILURE);
+    }
+    else if(pid < 0){
+        //Error forking
+        perror("msh");    
+    }
+    else{
+        //Parent process
+        wpid = waitpid(pid, &status, 0); //Sleep until the childs exits
+    }
+    
+    return 1;
+    
 }
