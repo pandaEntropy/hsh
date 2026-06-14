@@ -26,12 +26,12 @@ char **hsh_split_line(char *line);
 int hsh_cd(char **args);
 int hsh_help(char **args);
 int hsh_exit(char **args);
-int hsh_execute_line(char **args, Operator op);
+int hsh_execute_line(char **args, Operator op, int opcount);
 int hsh_num_builtins();
 int hsh_launch(char **args);
-Operator parse_ops(char *line);
+Operator parse_ops(char *line, int *opcount);
 char **parse_block(char *block);
-int handle_pipe(char **args1, char **args2);
+int handle_pipe(char **blocks, int pipecount);
 int handle_redir(char **args, char **out);
 int hsh_execvp(char *name, char **args);
 int handle_and(char **args1, char **args2);
@@ -50,20 +50,20 @@ int main(){
 void hsh_loop(){
 
     char *line;
-    int status;
+    int status, opcount;
     Operator op;
     char **blocks;
 
     do{
         printf("> ");
         line = hsh_read_line();
-        op = parse_ops(line);
+        op = parse_ops(line, &opcount);
         blocks = hsh_split_line(line);
-        status = hsh_execute_line(blocks, op);
+        status = hsh_execute_line(blocks, op, opcount);
 
         free(line);
         free(blocks);
-    }while(status == 0);
+    }while(status != -1);
 }
 
 
@@ -115,7 +115,9 @@ char **hsh_split_line(char *line){
         exit(EXIT_FAILURE);
     }
 
-    block = strtok(line, HSH_BLOCK_DELIM);
+    char *dup_line = strdup(line);
+
+    block = strtok(dup_line, HSH_BLOCK_DELIM);
 
     while(block != NULL){
         blocks[position] = block;
@@ -138,16 +140,13 @@ char **hsh_split_line(char *line){
     return blocks;
 }
 
-int hsh_execute_line(char **blocks, Operator op){
-    if(blocks[0] == NULL){
-        return 1;
-    }
-
+int hsh_execute_line(char **blocks, Operator op, int opcount){
     char **args1 = parse_block(blocks[0]);
     char **args2 = parse_block(blocks[1]);
+
     switch(op){
         case OP_PIPE:
-            return handle_pipe(args1, args2);
+            return handle_pipe(blocks, opcount);
 
         case OP_REDIR:
             return handle_redir(args1, args2);
@@ -167,6 +166,7 @@ int hsh_execute_line(char **blocks, Operator op){
 }
 
 int hsh_launch(char **args){
+    if(args == NULL) return 1;
 
     for(int i = 0; i < hsh_num_builtins(); i++){
         if(strcmp(args[0], builtin_str[i]) == 0){
@@ -180,7 +180,7 @@ int hsh_launch(char **args){
     pid = fork();
     if(pid == 0){
         execvp(args[0], args);
-        perror("hsh: exec failed");
+        perror("hsh: command execution failed");
         exit(EXIT_FAILURE);
     }
     else if(pid < 0){
@@ -227,44 +227,68 @@ int hsh_help(char **args){
 }
 
 int hsh_exit(char **args){
-    return 1;
+    return -1;
 }
 
-Operator parse_ops(char *line){
-    for(size_t i = 0; line[i] != '\0'; i++){
+Operator parse_ops(char *line, int *opcount){
+    int count = 0;
+    Operator op = OP_NONE;
+    for(int i = 0; line[i] != '\0'; i++){
         if(line[i] == '|'){
 
             if(line[i + 1] && line[i + 1] == '|'){
-                return OP_OR;
+                if(op != OP_NONE){
+                    fprintf(stderr, "hsh: Invalid operator sequence\n");
+                    return -1;
+                }
+                op = OP_OR;
+                count++;
+                i++;
+                continue;
             }
+            op = OP_PIPE;
+            count++;
 
-            return OP_PIPE;
         }
 
         if(line[i] == '>'){
-            return OP_REDIR;
+            if(op != OP_NONE){
+                fprintf(stderr, "hsh: Invalid operator sequence\n");
+                return -1;
+            }
+            op = OP_REDIR;
+            
         }
 
         if(line[i] == '&'){
             if(line[i + 1] && line[i + 1] == '&'){
-                return OP_AND;
+                if(op != OP_NONE){
+                    fprintf(stderr, "hsh: Invalid operator sequence\n");
+                    return -1;
+                }
+                op = OP_AND;
+                count++;
+                i++;
             }
         }
     }
 
-    return OP_NONE;
+    *opcount = count;
+    return op;
 }
 
 char **parse_block(char *block){
     if(block == NULL) return NULL;
 
+    char *dup_block = strdup(block);
+
     int bufsize = HSH_TOK_BUFSIZE;
     char **tokens = malloc(bufsize * sizeof(char*));
     int index = 0;
 
-    char *token = strtok(block, HSH_TOK_DELIM);
+    char *token = strtok(dup_block, HSH_TOK_DELIM);
     while(token != NULL){
-        tokens[index] = token;
+        tokens[index] = strdup(token);
         index++;
 
         if(index >= HSH_TOK_BUFSIZE){
@@ -283,77 +307,80 @@ char **parse_block(char *block){
     }
 
     tokens[index] = NULL;
+    free(dup_block);
     return tokens;
 }
 
-int handle_pipe(char **args1, char **args2){
-    if(!args1 || !args2) return 1;
+int handle_pipe(char **blocks, int pipecount){
+    if(blocks == NULL) return 1;
 
     int fd[2];
-    pid_t pid1, pid2;
+    int in_fd = STDIN_FILENO;
+    int num_commands = pipecount + 1;
 
-    if(pipe(fd) == -1){
-        perror("hsh: pipe failed");
-        return 1;
+    for(int i = 0; i < num_commands; i++){
+        if(blocks[i] == NULL || blocks[i][0] == '\0'){
+            fprintf(stderr, "hsh: Syntax error\n");
+            return 1;
+        }
     }
 
-    pid1 = fork();
-    if(pid1 == 0){
-        if(dup2(fd[1], STDOUT_FILENO) == -1){
-            perror("hsh: dup2 failed");
-            exit(EXIT_FAILURE);
+    for(int i = 0; i < num_commands; i++){
+        if(num_commands - 1 > i){
+            if(pipe(fd) != 0){
+                perror("hsh: pipe failed");
+                return 1;
+            }
         }
 
-        close(fd[0]);
-        close(fd[1]);
+        pid_t pid = fork();
+        if(pid == 0){
+            if(in_fd != STDIN_FILENO){
+                dup2(in_fd, STDIN_FILENO);
+                close(in_fd);
+            }
 
-        int exec_status = hsh_execvp(args1[0], args1);
-        if(exec_status != 0){
-            perror("hsh: command execution failed");
+            if(num_commands - 1 > i){
+                dup2(fd[1], STDOUT_FILENO);
+                close(fd[1]);
+                close(fd[0]);
+            }
+
+            char **args = parse_block(blocks[i]);
+            int exec_status = hsh_execvp(args[0], args);
+            if(exec_status != 0){
+                perror("hsh: command execution failed");
+            }
+            exit(exec_status);
+        }
+        else if(pid < 0){
+            perror("hsh: fork failed");
+            return 1;
+        }
+        else{
+            if(in_fd != STDIN_FILENO){
+                close(in_fd);
+            }
+
+            if(num_commands - 1 > i){
+                in_fd = fd[0];
+                close(fd[1]);
+            }
+        }
+    }
+
+    int status;
+    pid_t wpid = wait(&status);
+    int exit_code = 0;
+    while(wpid != -1){
+        if(WIFSIGNALED(status) || (WIFEXITED(status) && WEXITSTATUS(status) != 0)){
+            exit_code = 1;
         }
 
-        exit(exec_status);
-    }
-    else if(pid1 < 0){
-        perror("hsh: fork failed");
-        return 1;
-    }
-    
-    pid2 = fork();
-    if(pid2 == 0){
-        if(dup2(fd[0], STDIN_FILENO) == -1){
-            perror("hsh: dup 2 failed");
-            exit(EXIT_FAILURE);
-        }
-
-        close(fd[1]);
-        close(fd[0]);
-
-        int exec_status = hsh_execvp(args2[0], args2);
-        if(exec_status != 0){
-            perror("hsh: command execution failed");
-        }
-
-        exit(exec_status);
-    }
-    else if(pid2 < 0){
-        perror("hsh: fork failed");
-        return 1;
+        wpid = wait(&status);
     }
 
-    close(fd[0]);
-    close(fd[1]);
-
-    int status1, status2;
-
-    waitpid(pid1, &status1, 0);
-    waitpid(pid2, &status2, 0);
-
-    if(WIFEXITED(status1) && WIFEXITED(status2)){
-        return (WEXITSTATUS(status1) == 0 && WEXITSTATUS(status2) == 0) ? 0 : 1;
-    }
-
-    return 1;
+    return exit_code;
 }
 
 int handle_redir(char **args, char **out){
@@ -372,6 +399,9 @@ int handle_redir(char **args, char **out){
         close(fd);
 
         int exec_status = hsh_execvp(args[0], args);
+        if(exec_status != 0){
+            perror("hsh: command execution failed fff");
+        }
         exit(exec_status);
     }
     else if(pid < 0){
@@ -392,6 +422,10 @@ int handle_redir(char **args, char **out){
 }
 
 int hsh_execvp(char *name, char **args){
+    if(name == NULL || args == NULL){
+        return 1;
+    }
+
     for(int i = 0; i < hsh_num_builtins(); i++){
         if(strcmp(name, builtin_str[i]) == 0){
             return builtin_func[i](args);
