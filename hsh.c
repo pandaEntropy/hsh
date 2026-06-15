@@ -29,13 +29,17 @@ int hsh_exit(char **args);
 int hsh_execute_line(char **args, Operator op, int opcount);
 int hsh_num_builtins();
 int hsh_launch(char **args);
+
 Operator parse_ops(char *line, int *opcount);
 char **parse_block(char *block);
+
 int handle_pipe(char **blocks, int pipecount);
-int handle_redir(char **args, char **out);
+int handle_redir(char *block, char *out);
 int hsh_execvp(char *name, char **args);
-int handle_and(char **args1, char **args2);
-int handle_or(char **args1, char **args2);
+int handle_and(char *block1, char *block2);
+int handle_or(char *block1, char *block2);
+int handle_op_none(char *block);
+void free_args(char **args);
 
 char *builtin_str[] = {"cd", "help", "exit"};
 int (*builtin_func[]) (char **) = {hsh_cd,  hsh_help, hsh_exit};
@@ -62,7 +66,7 @@ void hsh_loop(){
         status = hsh_execute_line(blocks, op, opcount);
 
         free(line);
-        free(blocks);
+        free_args(blocks);
     }while(status != -1);
 }
 
@@ -120,7 +124,7 @@ char **hsh_split_line(char *line){
     block = strtok(dup_line, HSH_BLOCK_DELIM);
 
     while(block != NULL){
-        blocks[position] = block;
+        blocks[position] = strdup(block);
         position++;
 
         if(position >= bufsize){
@@ -137,28 +141,26 @@ char **hsh_split_line(char *line){
     }
 
     blocks[position] = NULL;
+    free(dup_line);
     return blocks;
 }
 
 int hsh_execute_line(char **blocks, Operator op, int opcount){
-    char **args1 = parse_block(blocks[0]);
-    char **args2 = parse_block(blocks[1]);
-
     switch(op){
         case OP_PIPE:
             return handle_pipe(blocks, opcount);
 
         case OP_REDIR:
-            return handle_redir(args1, args2);
+            return handle_redir(blocks[0], blocks[1]);
 
         case OP_AND:
-            return handle_and(args1, args2);
+            return handle_and(blocks[0], blocks[1]);
 
         case OP_OR:
-            return handle_or(args1, args2);
+            return handle_or(blocks[0], blocks[1]);
 
         case OP_NONE:
-            return hsh_launch(args1);
+            return handle_op_none(blocks[0]);
     }
 
     fprintf(stderr, "hsh: operator not found\n");
@@ -180,7 +182,7 @@ int hsh_launch(char **args){
     pid = fork();
     if(pid == 0){
         execvp(args[0], args);
-        perror("hsh: command execution failed");
+        fprintf(stderr, "hsh: %s: command not found\n", args[0]);
         exit(EXIT_FAILURE);
     }
     else if(pid < 0){
@@ -257,7 +259,7 @@ Operator parse_ops(char *line, int *opcount){
                 return -1;
             }
             op = OP_REDIR;
-            
+
         }
 
         if(line[i] == '&'){
@@ -333,6 +335,8 @@ int handle_pipe(char **blocks, int pipecount){
             }
         }
 
+        char **args = parse_block(blocks[i]);
+
         pid_t pid = fork();
         if(pid == 0){
             if(in_fd != STDIN_FILENO){
@@ -346,11 +350,11 @@ int handle_pipe(char **blocks, int pipecount){
                 close(fd[0]);
             }
 
-            char **args = parse_block(blocks[i]);
             int exec_status = hsh_execvp(args[0], args);
-            if(exec_status != 0){
-                perror("hsh: command execution failed");
+            if(exec_status != 0 && args[0] != NULL){
+                fprintf(stderr, "hsh: %s: command not found\n", args[0]);
             }
+            free_args(args);
             exit(exec_status);
         }
         else if(pid < 0){
@@ -366,6 +370,8 @@ int handle_pipe(char **blocks, int pipecount){
                 in_fd = fd[0];
                 close(fd[1]);
             }
+
+            free_args(args);
         }
     }
 
@@ -383,8 +389,10 @@ int handle_pipe(char **blocks, int pipecount){
     return exit_code;
 }
 
-int handle_redir(char **args, char **out){
-    if(!args || !out) return 1;
+int handle_redir(char *block, char *out_block){
+    char **args = parse_block(block);
+    char **out = parse_block(out_block);
+    if(args == NULL || out == NULL) return 1;
 
     pid_t pid = fork();
 
@@ -399,8 +407,8 @@ int handle_redir(char **args, char **out){
         close(fd);
 
         int exec_status = hsh_execvp(args[0], args);
-        if(exec_status != 0){
-            perror("hsh: command execution failed fff");
+        if(exec_status != 0 && args[0] != NULL){
+            fprintf(stderr, "hsh: %s: command not found\n", args[0]);
         }
         exit(exec_status);
     }
@@ -408,6 +416,9 @@ int handle_redir(char **args, char **out){
         perror("hsh: fork failed");
         return 1;
     }
+
+    free_args(args);
+    free_args(out);
 
     int status;
     waitpid(pid, &status, 0);
@@ -436,7 +447,9 @@ int hsh_execvp(char *name, char **args){
     return 1;
 }
 
-int handle_and(char **args1, char **args2){
+int handle_and(char *block1, char *block2){
+    char **args1 = parse_block(block1);
+    char **args2 = parse_block(block2);
     if(args1 == NULL || args2 == NULL) return 1;
 
     int status = hsh_launch(args1);
@@ -445,10 +458,14 @@ int handle_and(char **args1, char **args2){
         status = hsh_launch(args2);
     }
 
+    free_args(args1);
+    free_args(args2);
     return status;
 }
 
-int handle_or(char **args1, char **args2){
+int handle_or(char *block1, char *block2){
+    char **args1 = parse_block(block1);
+    char **args2 = parse_block(block2);
     if(args1 == NULL || args2 == NULL) return 1;
 
     int status = hsh_launch(args1);
@@ -457,5 +474,26 @@ int handle_or(char **args1, char **args2){
         status = hsh_launch(args2);
     }
 
+    free_args(args1);
+    free_args(args2);
+    return status;
+}
+
+void free_args(char **args){
+    if(args == NULL) return;
+
+    for(int i = 0; args[i] != NULL; i++){
+        free(args[i]);
+    }
+    free(args);
+}
+
+int handle_op_none(char *block){
+    char **args = parse_block(block);
+    if(args == NULL) return 1;
+
+    int status = hsh_launch(args);
+
+    free_args(args);
     return status;
 }
