@@ -40,9 +40,11 @@ int handle_and(char *block1, char *block2);
 int handle_or(char *block1, char *block2);
 int handle_op_none(char *block);
 void free_args(char **args);
+int is_builtin(char *name);
+int exec_builtin(char **args, int index);
 
 char *builtin_str[] = {"cd", "help", "exit"};
-int (*builtin_func[]) (char **) = {hsh_cd,  hsh_help, hsh_exit};
+int (*builtin_func[])(char **) = {hsh_cd,  hsh_help, hsh_exit};
 
 int main(){
 
@@ -170,10 +172,9 @@ int hsh_execute_line(char **blocks, Operator op, int opcount){
 int hsh_launch(char **args){
     if(args == NULL) return 1;
 
-    for(int i = 0; i < hsh_num_builtins(); i++){
-        if(strcmp(args[0], builtin_str[i]) == 0){
-            return builtin_func[i](args);
-        }
+    int index = is_builtin(args[0]);
+    if(index >= 0){
+        return exec_builtin(args, index);
     }
 
     pid_t pid;
@@ -350,12 +351,15 @@ int handle_pipe(char **blocks, int pipecount){
                 close(fd[0]);
             }
 
-            int exec_status = hsh_execvp(args[0], args);
-            if(exec_status != 0 && args[0] != NULL){
-                fprintf(stderr, "hsh: %s: command not found\n", args[0]);
+            int index = is_builtin(args[0]);
+            if(index >= 0){
+                int exec_status = exec_builtin(args, index);
+                exit(exec_status);
             }
-            free_args(args);
-            exit(exec_status);
+
+            execvp(args[0], args);
+            fprintf(stderr, "hsh: %s: command not found\n", args[0]);
+            exit(EXIT_FAILURE);
         }
         else if(pid < 0){
             perror("hsh: fork failed");
@@ -406,11 +410,15 @@ int handle_redir(char *block, char *out_block){
         dup2(fd, STDOUT_FILENO);
         close(fd);
 
-        int exec_status = hsh_execvp(args[0], args);
-        if(exec_status != 0 && args[0] != NULL){
-            fprintf(stderr, "hsh: %s: command not found\n", args[0]);
+        int index = is_builtin(args[0]);
+        if(index >= 0){
+            int exec_status = exec_builtin(args, index);
+            exit(exec_status);
         }
-        exit(exec_status);
+
+        execvp(args[0], args);
+        fprintf(stderr, "hsh: %s: command not found\n", args[0]);
+        exit(EXIT_FAILURE);
     }
     else if(pid < 0){
         perror("hsh: fork failed");
@@ -429,21 +437,6 @@ int handle_redir(char *block, char *out_block){
     }
 
     //child terminated by a signal
-    return 1;
-}
-
-int hsh_execvp(char *name, char **args){
-    if(name == NULL || args == NULL){
-        return 1;
-    }
-
-    for(int i = 0; i < hsh_num_builtins(); i++){
-        if(strcmp(name, builtin_str[i]) == 0){
-            return builtin_func[i](args);
-        }
-    }
-
-    execvp(name, args);
     return 1;
 }
 
@@ -496,4 +489,22 @@ int handle_op_none(char *block){
 
     free_args(args);
     return status;
+}
+
+int is_builtin(char *name){
+    if(name == NULL) return -1;
+
+    for(int i = 0; i < hsh_num_builtins(); i++){
+        if(strcmp(name, builtin_str[i]) == 0){
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+int exec_builtin(char **args, int index){
+    if(args == NULL || index < 0) return 1;
+
+    return builtin_func[index](args);
 }
