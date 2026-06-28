@@ -8,6 +8,8 @@
 #include <sys/time.h>
 #include <libgen.h>
 #include <time.h>
+#include <sys/sendfile.h>
+#include <fcntl.h>
 
 #include "memento.h"
 
@@ -26,6 +28,13 @@ typedef struct CmdRule{
     char *name;
     Cmdtype type;
 }CmdRule;
+
+typedef struct TrashFile{
+    char *path;
+    char *trash_path;
+    unsigned int permissions;
+    struct timeval times[2];
+}TrashFile;
 
 typedef struct CreateMemento{
     char **paths;
@@ -49,7 +58,8 @@ typedef struct MoveMemento{
 }MoveMemento;
 
 typedef struct DeleteMemento{
-    char* (*paths)[2];
+    TrashFile *tfiles;
+
     char **parent_dirs;
     int num_paths;
 
@@ -59,6 +69,7 @@ typedef struct DeleteMemento{
 typedef struct InternalMemento{
     char *cwd;
 }InternalMemento;
+
 
 void push(HollowMemento holmem);
 void get_timestamps(char *name, struct timeval *time);
@@ -85,9 +96,9 @@ Cmdtype get_cmdtype(char *name){
     return CMD_NOUNDO;
 }
 
-/*
- * TODO later implement inode tracking
+/*TODO
  * Add error checks
+ * Add cleanup on shell exit
  * Change to the arena with a pool at the end method
 */
 
@@ -149,15 +160,15 @@ void create_delmem(char **args, int arg_idx, int argc, HollowMemento *holmem){
 
     DeleteMemento *delmem = malloc(sizeof(DeleteMemento));
 
-    delmem->paths = malloc(num_paths * sizeof(*delmem->paths));
+    delmem->tfiles = malloc(num_paths * sizeof(TrashFile));
     delmem->parent_dirs = malloc(num_paths * sizeof(char *));
     delmem->parent_times = malloc(sizeof(*delmem->parent_times) * num_paths);
 
     delmem->num_paths = num_paths;
 
     for(int i = 0; args[i + arg_idx] != NULL; i++){
-        delmem->paths[i][0] = strdup(args[i + arg_idx]);
-        delmem->paths[i][1] = trash(args[i + arg_idx]);
+        delmem->tfiles[i].path = strdup(args[i + arg_idx]);
+        delmem->tfiles[i].trash_path = trash(args[i + arg_idx]);
 
         char tmp_path[PATH_MAX];
         snprintf(tmp_path, sizeof(tmp_path), "%s", args[i + arg_idx]);
@@ -165,7 +176,13 @@ void create_delmem(char **args, int arg_idx, int argc, HollowMemento *holmem){
         char *dir = dirname(tmp_path);
         delmem->parent_dirs[i] = strdup(dir);
 
+        struct stat st;
+        stat(args[i + arg_idx], &st);
+        delmem->tfiles[i].permissions =st.st_mode & 07777;
+
         get_timestamps(dir, delmem->parent_times[i]);
+
+        get_timestamps(args[i + arg_idx], delmem->tfiles[i].times);
     }
 
     holmem->memtype = MEM_DELETE;
@@ -255,12 +272,12 @@ void free_movmem(MoveMemento *movmem){
 
 void free_delmem(DeleteMemento *delmem){
     for(int i = 0; i < delmem->num_paths; i++){
-        free(delmem->paths[i][0]);
-        free(delmem->paths[i][1]);
+        free(delmem->tfiles[i].path);
+        free(delmem->tfiles[i].trash_path);
         free(delmem->parent_dirs[i]);
     }
 
-    free(delmem->paths);
+    free(delmem->tfiles);
     free(delmem->parent_dirs);
     free(delmem->parent_times);
 
@@ -362,8 +379,11 @@ void undo_movmem(MoveMemento *movmem){
 
 void undo_delmem(DeleteMemento *delmem){
     for(int i = 0; i < delmem->num_paths; i++){
-        rename(delmem->paths[i][1], delmem->paths[i][0]);
+        rename(delmem->tfiles[i].trash_path, delmem->tfiles[i].path);
 
+        chmod(delmem->tfiles[i].path, delmem->tfiles[i].permissions);
+
+        utimes(delmem->tfiles[i].path, delmem->tfiles[i].times);
         utimes(delmem->parent_dirs[i], delmem->parent_times[i]);
     }
 }
@@ -436,8 +456,6 @@ int init_memento(){
     return 0;
 }
 
-// TODO COPY THE FILE DONT MOVE IT
-// Also add commands for emtpying the trash dir and printing it's contents
 char *trash(char *file){
     char chars[] = "0123456789abcdefghijklmnopqrstuvwxyz";
     char rname[9];
@@ -449,10 +467,24 @@ char *trash(char *file){
 
     rname[8] = '\0';
 
-    char buf[PATH_MAX];
-    snprintf(buf, sizeof(buf), "%s/%s", trash_path, rname);
+    char tfile[PATH_MAX];
+    snprintf(tfile, sizeof(tfile), "%s/%s", trash_path, rname);
 
-    rename(file, buf);
+    struct stat fstat;
+    stat(file, &fstat);
 
-    return strdup(buf);
+    int src_fd = open(file, O_RDONLY);
+    int dest_fd = open(tfile, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    off_t copied = 0;
+    off_t remaining = fstat.st_size;
+
+    while(remaining > 0){
+        ssize_t written = sendfile(dest_fd, src_fd, &copied, remaining);
+        remaining -= written;
+    }
+
+    close(src_fd);
+    close(dest_fd);
+
+    return strdup(tfile);
 }
