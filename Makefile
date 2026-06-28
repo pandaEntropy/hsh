@@ -1,15 +1,21 @@
 CC = gcc
-CFLAGS = -Wall -Wextra
+
+HSHOBJ = hsh.o memento.o
+DEPFILES = hsh.d memento.d
+
+CFLAGS = -Wall -Wextra -MD -MP
 
 all: hsh
 
-hsh: hsh.o
-	$(CC) -o hsh hsh.o
+hsh: $(HSHOBJ)
+	$(CC) -o hsh $^
 
-hsh.o: hsh.c
-	$(CC) $(CFLAGS) -c -o hsh.o hsh.c
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f hsh hsh.o
+	rm -f hsh $(HSHOBJ) $(DEPFILES)
+
+-include $(DEPFILES)
 
 .PHONY: clean

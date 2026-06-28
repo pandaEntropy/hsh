@@ -9,6 +9,8 @@
 #include <libgen.h>
 #include <time.h>
 
+#include "memento.h"
+
 #define MAX_USTACK 40
 
 typedef enum Cmdtype{
@@ -19,13 +21,6 @@ typedef enum Cmdtype{
     CMD_CREATE_DIR,
     CMD_NOUNDO
 }Cmdtype;
-
-typedef enum MemType{
-    MEM_CREATE,
-    MEM_MOVE,
-    MEM_DELETE,
-    MEM_INTERNAL
-}MemType;
 
 typedef struct CmdRule{
     char *name;
@@ -65,16 +60,6 @@ typedef struct InternalMemento{
     char *cwd;
 }InternalMemento;
 
-typedef struct HollowMemento{
-    MemType memtype;
-    union{
-        CreateMemento *creatmem;
-        MoveMemento *movmem;
-        DeleteMemento *delmem;
-        InternalMemento *intmem;
-    }mem;
-}HollowMemento;
-
 void push(HollowMemento holmem);
 void get_timestamps(char *name, struct timeval *time);
 char *trash(char *file);
@@ -106,7 +91,7 @@ Cmdtype get_cmdtype(char *name){
  * Change to the arena with a pool at the end method
 */
 
-void create_creatmem(char **args, int arg_idx, int argc, Cmdtype type){
+void create_creatmem(char **args, int arg_idx, int argc, HollowMemento *holmem, Cmdtype type){
     int num_paths = argc - arg_idx;
 
     CreateMemento *creatmem = malloc(sizeof(CreateMemento));
@@ -130,14 +115,13 @@ void create_creatmem(char **args, int arg_idx, int argc, Cmdtype type){
         get_timestamps(dir, creatmem->dir_times[i]);
     }
 
-    HollowMemento holmem;
-    holmem.memtype = MEM_CREATE;
-    holmem.mem.creatmem = creatmem;
-
-    push(holmem);
+    holmem->memtype = MEM_CREATE;
+    holmem->mem.creatmem = creatmem;
 }
 
-void create_movmem(char **args, int arg_idx, int argc){
+void create_movmem(char **args, int arg_idx, int argc, HollowMemento *holmem){
+    (void)argc;
+
     MoveMemento *movmem = malloc(sizeof(MoveMemento));
     movmem->source = strdup(args[arg_idx]);
     movmem->dest = strdup(args[arg_idx + 1]);
@@ -156,21 +140,18 @@ void create_movmem(char **args, int arg_idx, int argc){
 
     get_timestamps(dir, movmem->dpdir_time);
 
-    HollowMemento holmem;
-    holmem.memtype = MEM_MOVE;
-    holmem.mem.movmem = movmem;
-
-    push(holmem);
+    holmem->memtype = MEM_MOVE;
+    holmem->mem.movmem = movmem;
 }
 
-void create_delmem(char **args, int arg_idx, int argc){
+void create_delmem(char **args, int arg_idx, int argc, HollowMemento *holmem){
     int num_paths = argc - arg_idx;
 
     DeleteMemento *delmem = malloc(sizeof(DeleteMemento));
 
-    delmem->paths = malloc(num_paths * sizeof(char *) * 2);
+    delmem->paths = malloc(num_paths * sizeof(*delmem->paths));
     delmem->parent_dirs = malloc(num_paths * sizeof(char *));
-    delmem->parent_times = malloc(sizeof(struct timeval) * num_paths * 2);
+    delmem->parent_times = malloc(sizeof(*delmem->parent_times) * num_paths);
 
     delmem->num_paths = num_paths;
 
@@ -187,14 +168,15 @@ void create_delmem(char **args, int arg_idx, int argc){
         get_timestamps(dir, delmem->parent_times[i]);
     }
 
-    HollowMemento holmem;
-    holmem.memtype = MEM_DELETE;
-    holmem.mem.delmem = delmem;
-
-    push(holmem);
+    holmem->memtype = MEM_DELETE;
+    holmem->mem.delmem = delmem;
 }
 
-void create_intmem(char **args, int arg_idx, int argc){
+void create_intmem(char **args, int arg_idx, int argc, HollowMemento *holmem){
+    (void)args;
+    (void)arg_idx;
+    (void)argc;
+
     InternalMemento *intmem = malloc(sizeof(InternalMemento));
 
     char buf[PATH_MAX];
@@ -202,15 +184,14 @@ void create_intmem(char **args, int arg_idx, int argc){
         intmem->cwd = strdup(buf);
     }
 
-    HollowMemento holmem;
-    holmem.memtype = MEM_INTERNAL;
-    holmem.mem.intmem = intmem;
-
-    push(holmem);
+    holmem->memtype = MEM_INTERNAL;
+    holmem->mem.intmem = intmem;
 }
 
-void create_memento(char **args){
-    if(args == NULL || args[0] == NULL) return;
+void create_holmem(char **args, HollowMemento *holmem){
+    if(args == NULL || args[0] == NULL){
+        return;
+    }
 
     int arg_idx = 0, argc = 0;
     for(int i = 0; args[i] != NULL; i++){
@@ -224,26 +205,27 @@ void create_memento(char **args){
 
     switch(type){
         case CMD_CREATE_FILE:
-            create_creatmem(args, arg_idx, argc, CMD_CREATE_FILE);
+            create_creatmem(args, arg_idx, argc, holmem, CMD_CREATE_FILE);
             break;
 
         case CMD_CREATE_DIR:
-            create_creatmem(args, arg_idx, argc, CMD_CREATE_DIR);
+            create_creatmem(args, arg_idx, argc, holmem, CMD_CREATE_DIR);
             break;
 
         case CMD_MOVE:
-            create_movmem(args, arg_idx, argc);
+            create_movmem(args, arg_idx, argc, holmem);
             break;
 
         case CMD_DELETE:
-            create_delmem(args, arg_idx, argc);
+            create_delmem(args, arg_idx, argc, holmem);
             break;
 
         case CMD_INTERNAL:
-            create_intmem(args, arg_idx, argc);
+            create_intmem(args, arg_idx, argc, holmem);
             break;
 
         case CMD_NOUNDO:
+            holmem->memtype = MEM_INV;
             return;
     }
 }
@@ -295,19 +277,28 @@ void free_holmem(HollowMemento holmem){
     switch(holmem.memtype){
         case MEM_CREATE:
             free_creatmem(holmem.mem.creatmem);
+            break;
 
         case MEM_MOVE:
             free_movmem(holmem.mem.movmem);
+            break;
 
         case MEM_DELETE:
             free_delmem(holmem.mem.delmem);
+            break;
 
         case MEM_INTERNAL:
             free_intmem(holmem.mem.intmem);
+            break;
+
+        case MEM_INV:
+            return;
     }
 }
 
 void push(HollowMemento holmem){
+    if(holmem.memtype == MEM_INV) return;
+
     if(utop >= MAX_USTACK - 1){
 
         free_holmem(ustack[0]);
@@ -381,8 +372,10 @@ void undo_intmem(InternalMemento *intmem){
     chdir(intmem->cwd);
 }
 
-void undo(){
-    if(utop < 0) return;
+int undo(char **args){
+    (void)args;
+
+    if(utop < 0) return 1;
     HollowMemento holmem = ustack[utop];
 
     switch(holmem.memtype){
@@ -399,11 +392,17 @@ void undo(){
             break;
 
         case MEM_INTERNAL:
+            fprintf(stderr, "undoing intmem\n");
             undo_intmem(holmem.mem.intmem);
             break;
+
+        default:
+            fprintf(stderr, "memtype not found\n");
     }
 
     pop();
+
+    return 0;
 }
 
 int init_memento(){
@@ -437,6 +436,8 @@ int init_memento(){
     return 0;
 }
 
+// TODO COPY THE FILE DONT MOVE IT
+// Also add commands for emtpying the trash dir and printing it's contents
 char *trash(char *file){
     char chars[] = "0123456789abcdefghijklmnopqrstuvwxyz";
     char rname[9];
