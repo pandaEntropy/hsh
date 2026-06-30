@@ -56,6 +56,8 @@ int main(){
 
     hsh_loop();
 
+    mem_cleanup();
+
     return EXIT_SUCCESS;
 }
 

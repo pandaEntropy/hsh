@@ -29,5 +29,6 @@ void create_holmem(char **args, HollowMemento *holmem);
 void push(HollowMemento holmem);
 int undo(char **args);
 void free_holmem(HollowMemento holmem);
+void mem_cleanup();
 
 #endif

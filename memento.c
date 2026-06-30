@@ -17,7 +17,8 @@
 
 typedef enum Cmdtype{
     CMD_MOVE,
-    CMD_DELETE,
+    CMD_DELETE_FILE,
+    CMD_DELETE_DIR,
     CMD_INTERNAL,
     CMD_CREATE_FILE,
     CMD_CREATE_DIR,
@@ -82,7 +83,7 @@ static char trash_path[PATH_MAX];
 
 CmdRule rule_table[] = {
     {"mv", CMD_MOVE}, {"rename", CMD_MOVE}, {"cd", CMD_INTERNAL},
-    {"rm", CMD_DELETE}, {"rmdir", CMD_DELETE}, {"unlink", CMD_DELETE},
+    {"rm", CMD_DELETE_FILE}, {"rmdir", CMD_DELETE_DIR}, {"unlink", CMD_DELETE_FILE},
     {"mkdir", CMD_CREATE_DIR}, {"touch", CMD_CREATE_FILE}, {"ln", CMD_CREATE_FILE}
 };
 
@@ -155,7 +156,7 @@ void create_movmem(char **args, int arg_idx, int argc, HollowMemento *holmem){
     holmem->mem.movmem = movmem;
 }
 
-void create_delmem(char **args, int arg_idx, int argc, HollowMemento *holmem){
+void create_delmem(char **args, int arg_idx, int argc, HollowMemento *holmem, Cmdtype type){
     int num_paths = argc - arg_idx;
 
     DeleteMemento *delmem = malloc(sizeof(DeleteMemento));
@@ -168,7 +169,13 @@ void create_delmem(char **args, int arg_idx, int argc, HollowMemento *holmem){
 
     for(int i = 0; args[i + arg_idx] != NULL; i++){
         delmem->tfiles[i].path = strdup(args[i + arg_idx]);
-        delmem->tfiles[i].trash_path = trash(args[i + arg_idx]);
+
+        if(type == CMD_DELETE_FILE){
+            delmem->tfiles[i].trash_path = trash(args[i + arg_idx]);
+        }
+        else{
+            delmem->tfiles[i].trash_path = NULL;
+        }
 
         char tmp_path[PATH_MAX];
         snprintf(tmp_path, sizeof(tmp_path), "%s", args[i + arg_idx]);
@@ -177,7 +184,10 @@ void create_delmem(char **args, int arg_idx, int argc, HollowMemento *holmem){
         delmem->parent_dirs[i] = strdup(dir);
 
         struct stat st;
-        stat(args[i + arg_idx], &st);
+        if(stat(args[i + arg_idx], &st) != 0){
+            return;
+        }
+
         delmem->tfiles[i].permissions =st.st_mode & 07777;
 
         get_timestamps(dir, delmem->parent_times[i]);
@@ -233,8 +243,12 @@ void create_holmem(char **args, HollowMemento *holmem){
             create_movmem(args, arg_idx, argc, holmem);
             break;
 
-        case CMD_DELETE:
-            create_delmem(args, arg_idx, argc, holmem);
+        case CMD_DELETE_FILE:
+            create_delmem(args, arg_idx, argc, holmem, CMD_DELETE_FILE);
+            break;
+
+        case CMD_DELETE_DIR:
+            create_delmem(args, arg_idx, argc, holmem, CMD_DELETE_DIR);
             break;
 
         case CMD_INTERNAL:
@@ -272,6 +286,8 @@ void free_movmem(MoveMemento *movmem){
 
 void free_delmem(DeleteMemento *delmem){
     for(int i = 0; i < delmem->num_paths; i++){
+        unlink(delmem->tfiles[i].trash_path);
+
         free(delmem->tfiles[i].path);
         free(delmem->tfiles[i].trash_path);
         free(delmem->parent_dirs[i]);
@@ -343,7 +359,9 @@ void pop(){
 
 void get_timestamps(char *name, struct timeval *time){
     struct stat st;
-    stat(name, &st);
+    if(stat(name, &st) != 0){
+        return;
+    }
 
     time[0].tv_sec = st.st_atime;
     time[0].tv_usec = 0;
@@ -379,7 +397,12 @@ void undo_movmem(MoveMemento *movmem){
 
 void undo_delmem(DeleteMemento *delmem){
     for(int i = 0; i < delmem->num_paths; i++){
-        rename(delmem->tfiles[i].trash_path, delmem->tfiles[i].path);
+        if(delmem->tfiles[i].trash_path != NULL){
+            rename(delmem->tfiles[i].trash_path, delmem->tfiles[i].path);
+        }
+        else{
+            mkdir(delmem->tfiles[i].path, 0700);
+        }
 
         chmod(delmem->tfiles[i].path, delmem->tfiles[i].permissions);
 
@@ -412,12 +435,11 @@ int undo(char **args){
             break;
 
         case MEM_INTERNAL:
-            fprintf(stderr, "undoing intmem\n");
             undo_intmem(holmem.mem.intmem);
             break;
 
-        default:
-            fprintf(stderr, "memtype not found\n");
+        case MEM_INV:
+            break;
     }
 
     pop();
@@ -471,7 +493,9 @@ char *trash(char *file){
     snprintf(tfile, sizeof(tfile), "%s/%s", trash_path, rname);
 
     struct stat fstat;
-    stat(file, &fstat);
+    if(stat(file, &fstat) != 0){
+        return NULL;
+    }
 
     int src_fd = open(file, O_RDONLY);
     int dest_fd = open(tfile, O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -487,4 +511,10 @@ char *trash(char *file){
     close(dest_fd);
 
     return strdup(tfile);
+}
+
+void mem_cleanup(){
+    while(utop >= 0){
+        pop();
+    }
 }
