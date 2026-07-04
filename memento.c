@@ -362,8 +362,10 @@ void free_movmem(MoveMemento *movmem){
 }
 
 void free_delmem(DeleteMemento *delmem){
-    for(int i = 0; i < delmem->num_paths; i++){
-        unlink(delmem->tfiles[i].trash_path);
+    if(delmem->tfiles[0].trash_path != NULL){
+        for(int i = 0; i < delmem->num_paths; i++){
+            unlink(delmem->tfiles[i].trash_path);
+        }
     }
     free(delmem->root);
 }
