@@ -31,20 +31,21 @@ typedef struct CmdRule{
 }CmdRule;
 
 typedef struct TrashFile{
+    struct timeval times[2];
     char *path;
     char *trash_path;
     unsigned int permissions;
-    struct timeval times[2];
 }TrashFile;
 
 typedef struct CreateMemento{
-    char **paths;
+    struct timeval (*dir_times)[2];
     char **parent_dirs;
+
+    char **paths;
     int num_paths;
 
     bool is_dir;
-
-    struct timeval (*dir_times)[2];
+    void *root;
 }CreateMemento;
 
 typedef struct MoveMemento{
@@ -56,6 +57,8 @@ typedef struct MoveMemento{
 
     struct timeval spdir_time[2];
     struct timeval dpdir_time[2];
+
+    void *root;
 }MoveMemento;
 
 typedef struct DeleteMemento{
@@ -65,16 +68,24 @@ typedef struct DeleteMemento{
     int num_paths;
 
     struct timeval (*parent_times)[2];
+    void *root;
 }DeleteMemento;
 
 typedef struct InternalMemento{
     char *cwd;
+    void *root;
 }InternalMemento;
+
+typedef struct Arena{
+    size_t offset;
+    size_t size;
+    char *root;
+}Arena;
 
 
 void push(HollowMemento holmem);
 void get_timestamps(char *name, struct timeval *time);
-char *trash(char *file);
+void trash(char *file, char *tfile);
 
 static HollowMemento ustack[MAX_USTACK];
 static int utop = -1;
@@ -87,6 +98,20 @@ CmdRule rule_table[] = {
     {"mkdir", CMD_CREATE_DIR}, {"touch", CMD_CREATE_FILE}, {"ln", CMD_CREATE_FILE}
 };
 
+void *ar_alloc(Arena *arena, size_t size, size_t alignment){
+    unsigned long cur_ptr = (unsigned long)arena->root + arena->offset;
+    unsigned long aligned_ptr = (cur_ptr + (alignment - 1)) & ~(alignment - 1);
+
+    size_t new_offset = aligned_ptr - (unsigned long)arena->root + size;
+
+    if(new_offset > arena->size){
+        return NULL;
+    }
+
+    arena->offset = new_offset;
+    return (void*)aligned_ptr;
+}
+
 Cmdtype get_cmdtype(char *name){
     int length = sizeof(rule_table) / sizeof(CmdRule); 
     for(int i = 0; i < length; i++){
@@ -97,32 +122,44 @@ Cmdtype get_cmdtype(char *name){
     return CMD_NOUNDO;
 }
 
-/*TODO
- * Add error checks
- * Add cleanup on shell exit
- * Change to the arena with a pool at the end method
-*/
+void create_creatmem(char **args, size_t char_count, int argc, HollowMemento *holmem, Cmdtype type){
+    int num_paths = argc - 1;
 
-void create_creatmem(char **args, int arg_idx, int argc, HollowMemento *holmem, Cmdtype type){
-    int num_paths = argc - arg_idx;
+    size_t creatmem_sz = sizeof(CreateMemento);
+    size_t path_sz = num_paths * sizeof(char *);
+    size_t parent_dirs_sz = num_paths * sizeof(char *);
+    size_t dir_times_sz = sizeof(struct timeval) * num_paths * 2;
 
-    CreateMemento *creatmem = malloc(sizeof(CreateMemento));
+    size_t args_sz = char_count;
+    size_t dir_sz = char_count;
 
-    creatmem->paths = malloc(num_paths * sizeof(char *));
-    creatmem->parent_dirs = malloc(num_paths * sizeof(char *));
-    creatmem->dir_times = malloc(sizeof(struct timeval) * num_paths * 2);
+    size_t total_sz = creatmem_sz + path_sz + parent_dirs_sz + dir_times_sz + args_sz + dir_sz + 64;
+    Arena arena = {0};
+    arena.root = malloc(total_sz);
+    arena.size = total_sz;
 
+    CreateMemento *creatmem = ar_alloc(&arena, creatmem_sz, 8);
+    creatmem->root = arena.root;
+    creatmem->paths = ar_alloc(&arena, path_sz, 8);
+    creatmem->parent_dirs = ar_alloc(&arena, parent_dirs_sz, 8);
+    creatmem->dir_times = ar_alloc(&arena, dir_times_sz, 8);
     creatmem->is_dir = (type == CMD_CREATE_DIR);
     creatmem->num_paths = num_paths;
 
-    for(int i = 0; args[i + arg_idx] != NULL; i++){
-        creatmem->paths[i] = strdup(args[i + arg_idx]);
+    for(int i = 0; args[i + 1] != NULL; i++){
+        char *arg = args[i + 1];
+
+        char *arena_str = ar_alloc(&arena, strlen(arg) + 1, 1);
+        strcpy(arena_str, arg);
+        creatmem->paths[i] = arena_str;
 
         char tmp_path[PATH_MAX];
-        snprintf(tmp_path, sizeof(tmp_path), "%s", args[i + arg_idx]);
+        snprintf(tmp_path, sizeof(tmp_path), "%s", arg);
 
         char *dir = dirname(tmp_path);
-        creatmem->parent_dirs[i] = strdup(dir);
+        char *dir_str = ar_alloc(&arena, strlen(dir) + 1, 1);
+        strcpy(dir_str, dir);
+        creatmem->parent_dirs[i] = dir_str;
 
         get_timestamps(dir, creatmem->dir_times[i]);
     }
@@ -131,24 +168,43 @@ void create_creatmem(char **args, int arg_idx, int argc, HollowMemento *holmem, 
     holmem->mem.creatmem = creatmem;
 }
 
-void create_movmem(char **args, int arg_idx, int argc, HollowMemento *holmem){
+void create_movmem(char **args, size_t char_count, int argc, HollowMemento *holmem){
     (void)argc;
 
-    MoveMemento *movmem = malloc(sizeof(MoveMemento));
-    movmem->source = strdup(args[arg_idx]);
-    movmem->dest = strdup(args[arg_idx + 1]);
+    size_t movmem_sz = sizeof(MoveMemento);
+    size_t str_sz = (strlen(args[1]) + strlen(args[2]) + 2) * 2;
+
+    size_t total_sz = movmem_sz + str_sz + 64;
+
+    Arena arena = {0};
+    arena.root = malloc(total_sz);
+    arena.size = total_sz;
+
+    MoveMemento *movmem = ar_alloc(&arena, movmem_sz, 8);
+    movmem->root = arena.root;
+
+    char *src_str = ar_alloc(&arena, strlen(args[1]) + 1, 1);
+    strcpy(src_str, args[1]);
+    movmem->source = src_str;
+
+    char *dest_str = ar_alloc(&arena, strlen(args[2]) + 1, 1);
+    strcpy(dest_str, args[2]);
+    movmem->dest = dest_str;
 
     char tmp_path[PATH_MAX];
-
-    snprintf(tmp_path, sizeof(tmp_path), "%s", args[arg_idx]);
+    snprintf(tmp_path, sizeof(tmp_path), "%s", args[1]);
     char *dir = dirname(tmp_path);
-    movmem->source_pdir = strdup(dir);
+    char *arena_dir = ar_alloc(&arena, strlen(dir) + 1, 1);
+    strcpy(arena_dir, dir);
+    movmem->source_pdir = arena_dir;
 
     get_timestamps(dir, movmem->spdir_time);
 
-    snprintf(tmp_path, sizeof(tmp_path), "%s", args[arg_idx + 1]);
+    snprintf(tmp_path, sizeof(tmp_path), "%s", args[2]);
     dir = dirname(tmp_path);
-    movmem->dest_pdir = strdup(dir);
+    arena_dir = ar_alloc(&arena, strlen(dir) + 1, 1);
+    strcpy(arena_dir, dir);
+    movmem->dest_pdir = arena_dir;
 
     get_timestamps(dir, movmem->dpdir_time);
 
@@ -156,43 +212,74 @@ void create_movmem(char **args, int arg_idx, int argc, HollowMemento *holmem){
     holmem->mem.movmem = movmem;
 }
 
-void create_delmem(char **args, int arg_idx, int argc, HollowMemento *holmem, Cmdtype type){
-    int num_paths = argc - arg_idx;
+void create_delmem(char **args, size_t char_count, int argc, HollowMemento *holmem, Cmdtype type){
+    int num_paths = argc - 1;
 
-    DeleteMemento *delmem = malloc(sizeof(DeleteMemento));
+    size_t delmem_sz = sizeof(DeleteMemento);
+    size_t tfiles_sz = num_paths * sizeof(TrashFile);
+    size_t parent_dirs_sz = num_paths * sizeof(char *);
+    size_t parent_times_sz = sizeof(struct timeval) * num_paths * 2;
 
-    delmem->tfiles = malloc(num_paths * sizeof(TrashFile));
-    delmem->parent_dirs = malloc(num_paths * sizeof(char *));
-    delmem->parent_times = malloc(sizeof(*delmem->parent_times) * num_paths);
+    size_t arg_sz = char_count;
+    size_t dir_sz = char_count;
+    size_t trash_sz = num_paths * (strlen(trash_path) + 10);
 
+    size_t total_sz = delmem_sz + tfiles_sz + parent_dirs_sz + parent_times_sz + arg_sz + dir_sz + trash_sz + 64;
+
+    Arena arena = {0};
+    arena.root = malloc(total_sz);
+    arena.size = total_sz;
+
+    DeleteMemento *delmem = ar_alloc(&arena, delmem_sz, 8);
+    delmem->root = arena.root;
+    delmem->tfiles = ar_alloc(&arena, tfiles_sz, 8);
+    delmem->parent_dirs = ar_alloc(&arena, parent_dirs_sz, 8);
+    delmem->parent_times = ar_alloc(&arena, parent_times_sz, 8);
     delmem->num_paths = num_paths;
 
-    for(int i = 0; args[i + arg_idx] != NULL; i++){
-        delmem->tfiles[i].path = strdup(args[i + arg_idx]);
+    for(int i = 0; args[i + 1] != NULL; i++){
+        char *arg = args[i + 1];
+
+        char *arena_str = ar_alloc(&arena, strlen(arg) + 1, 1);
+        strcpy(arena_str, arg);
+        delmem->tfiles[i].path = arena_str;
 
         if(type == CMD_DELETE_FILE){
-            delmem->tfiles[i].trash_path = trash(args[i + arg_idx]);
+            char tmp_trash_path[PATH_MAX];
+            trash(arg, tmp_trash_path);
+
+            if(tmp_trash_path[0] == '\0'){
+                free(arena.root);
+                return;
+            }
+
+            char *t_str = ar_alloc(&arena, strlen(tmp_trash_path) + 1, 1);
+            strcpy(t_str, tmp_trash_path);
+            delmem->tfiles[i].trash_path = t_str;
         }
         else{
             delmem->tfiles[i].trash_path = NULL;
         }
 
-        char tmp_path[PATH_MAX];
-        snprintf(tmp_path, sizeof(tmp_path), "%s", args[i + arg_idx]);
+        char tmp_dir_path[PATH_MAX];
+        snprintf(tmp_dir_path, sizeof(tmp_dir_path), "%s", arg);
 
-        char *dir = dirname(tmp_path);
-        delmem->parent_dirs[i] = strdup(dir);
+        char *dir = dirname(tmp_dir_path);
+        char *arena_dir = ar_alloc(&arena, strlen(dir) + 1, 1);
+        strcpy(arena_dir, dir);
+        delmem->parent_dirs[i] = arena_dir;
 
         struct stat st;
-        if(stat(args[i + arg_idx], &st) != 0){
+        if(stat(arg, &st) != 0){
+            free(arena.root);
             return;
         }
 
-        delmem->tfiles[i].permissions =st.st_mode & 07777;
+        delmem->tfiles[i].permissions = st.st_mode & 07777;
 
         get_timestamps(dir, delmem->parent_times[i]);
 
-        get_timestamps(args[i + arg_idx], delmem->tfiles[i].times);
+        get_timestamps(arg, delmem->tfiles[i].times);
     }
 
     holmem->memtype = MEM_DELETE;
@@ -220,39 +307,44 @@ void create_holmem(char **args, HollowMemento *holmem){
         return;
     }
 
-    int arg_idx = 0, argc = 0;
-    for(int i = 0; args[i] != NULL; i++){
-        if(arg_idx == 0 && args[i][0] != '-'){
-            arg_idx = i;
-        }
-        argc++;
-    }
+    holmem->memtype = MEM_INV;
 
     Cmdtype type = get_cmdtype(args[0]);
 
+    int argc = 1;
+    size_t char_count = 0;
+    for(int i = 1; args[i] != NULL; i++){
+        if(args[i][0] == '-'){
+            type = CMD_NOUNDO;
+            break;
+        }
+        char_count += strlen(args[i]) + 1;
+        argc++;
+    }
+
     switch(type){
         case CMD_CREATE_FILE:
-            create_creatmem(args, arg_idx, argc, holmem, CMD_CREATE_FILE);
+            create_creatmem(args, char_count, argc, holmem, CMD_CREATE_FILE);
             break;
 
         case CMD_CREATE_DIR:
-            create_creatmem(args, arg_idx, argc, holmem, CMD_CREATE_DIR);
+            create_creatmem(args, char_count, argc, holmem, CMD_CREATE_DIR);
             break;
 
         case CMD_MOVE:
-            create_movmem(args, arg_idx, argc, holmem);
+            create_movmem(args, char_count, argc, holmem);
             break;
 
         case CMD_DELETE_FILE:
-            create_delmem(args, arg_idx, argc, holmem, CMD_DELETE_FILE);
+            create_delmem(args, char_count, argc, holmem, CMD_DELETE_FILE);
             break;
 
         case CMD_DELETE_DIR:
-            create_delmem(args, arg_idx, argc, holmem, CMD_DELETE_DIR);
+            create_delmem(args, char_count, argc, holmem, CMD_DELETE_DIR);
             break;
 
         case CMD_INTERNAL:
-            create_intmem(args, arg_idx, argc, holmem);
+            create_intmem(args, char_count, argc, holmem);
             break;
 
         case CMD_NOUNDO:
@@ -262,42 +354,18 @@ void create_holmem(char **args, HollowMemento *holmem){
 }
 
 void free_creatmem(CreateMemento *creatmem){
-    for(int i = 0; i < creatmem->num_paths; i++){
-        free(creatmem->paths[i]);
-        free(creatmem->parent_dirs[i]);
-    }
-
-    free(creatmem->paths);
-    free(creatmem->parent_dirs);
-    free(creatmem->dir_times);
-
-    free(creatmem);
+    free(creatmem->root);
 }
 
 void free_movmem(MoveMemento *movmem){
-    free(movmem->dest);
-    free(movmem->source);
-
-    free(movmem->source_pdir);
-    free(movmem->dest_pdir);
-
-    free(movmem);
+    free(movmem->root);
 }
 
 void free_delmem(DeleteMemento *delmem){
     for(int i = 0; i < delmem->num_paths; i++){
         unlink(delmem->tfiles[i].trash_path);
-
-        free(delmem->tfiles[i].path);
-        free(delmem->tfiles[i].trash_path);
-        free(delmem->parent_dirs[i]);
     }
-
-    free(delmem->tfiles);
-    free(delmem->parent_dirs);
-    free(delmem->parent_times);
-
-    free(delmem);
+    free(delmem->root);
 }
 
 void free_intmem(InternalMemento *intmem){
@@ -370,7 +438,6 @@ void get_timestamps(char *name, struct timeval *time){
     time[1].tv_usec = 0;
 }
 
-//WHat if a user uses a relative path, changes dir and tries to undo? Expand paths to abs paths when creating the memento
 void undo_creatmem(CreateMemento *creatmem, bool is_dir){
     if(is_dir){
         for(int i = 0; i < creatmem->num_paths; i++){
@@ -478,7 +545,7 @@ int init_memento(){
     return 0;
 }
 
-char *trash(char *file){
+void trash(char *file, char *tfile){
     char chars[] = "0123456789abcdefghijklmnopqrstuvwxyz";
     char rname[9];
 
@@ -489,16 +556,16 @@ char *trash(char *file){
 
     rname[8] = '\0';
 
-    char tfile[PATH_MAX];
-    snprintf(tfile, sizeof(tfile), "%s/%s", trash_path, rname);
+    snprintf(tfile, PATH_MAX, "%s/%s", trash_path, rname);
 
     struct stat fstat;
     if(stat(file, &fstat) != 0){
-        return NULL;
+        tfile[0] = '\0';
+        return;
     }
 
     int src_fd = open(file, O_RDONLY);
-    int dest_fd = open(tfile, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    int dest_fd = open(tfile, O_TRUNC | O_WRONLY | O_CREAT, 0600);
     off_t copied = 0;
     off_t remaining = fstat.st_size;
 
@@ -509,8 +576,6 @@ char *trash(char *file){
 
     close(src_fd);
     close(dest_fd);
-
-    return strdup(tfile);
 }
 
 void mem_cleanup(){

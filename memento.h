@@ -15,13 +15,13 @@ typedef enum MemType{
 }MemType;
 
 typedef struct HollowMemento{
-    MemType memtype;
     union{
         CreateMemento *creatmem;
         MoveMemento *movmem;
         DeleteMemento *delmem;
         InternalMemento *intmem;
     }mem;
+    MemType memtype;
 }HollowMemento;
 
 int init_memento();
