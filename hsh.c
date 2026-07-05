@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -19,6 +20,7 @@ typedef enum Operator{
     OP_REDIR,
     OP_AND,
     OP_OR,
+    OP_BG,
     OP_NONE
 }Operator;
 
@@ -37,10 +39,11 @@ char **parse_block(char *block);
 
 int handle_pipe(char **blocks, int pipecount);
 int handle_redir(char *block, char *out);
-int hsh_execvp(char *name, char **args);
 int handle_and(char *block1, char *block2);
 int handle_or(char *block1, char *block2);
+int handle_bg(char *block);
 int handle_op_none(char *block);
+
 void free_args(char **args);
 int is_builtin(char *name);
 int exec_builtin(char **args, int index);
@@ -48,7 +51,28 @@ int exec_builtin(char **args, int index);
 char *builtin_str[] = {"cd", "help", "exit", "undo"};
 int (*builtin_func[])(char **) = {hsh_cd,  hsh_help, hsh_exit, undo};
 
+void init_sigs(){
+    struct sigaction ign_sig = {0};
+    ign_sig.sa_handler = SIG_IGN;
+    ign_sig.sa_flags = 0;
+
+    sigaction(SIGTSTP, &ign_sig, NULL);
+    sigaction(SIGINT, &ign_sig, NULL);
+    sigaction(SIGCHLD, &ign_sig, NULL); //By ignoring, the OS reaps the children
+}
+
+/*
+ * TODO
+ *Figure out the error handling system with all these error codes
+ *Clean up the code
+*/
+
+
+
 int main(){
+
+    init_sigs();
+
     if(init_memento() != 0){
         fprintf(stderr, "hsh: Failed to start\n");
         return EXIT_FAILURE;
@@ -69,7 +93,7 @@ void hsh_loop(){
     char **blocks;
 
     do{
-        printf("> ");
+        printf("\n> ");
         line = hsh_read_line();
         op = parse_ops(line, &opcount);
         blocks = hsh_split_line(line);
@@ -169,6 +193,9 @@ int hsh_execute_line(char **blocks, Operator op, int opcount){
         case OP_OR:
             return handle_or(blocks[0], blocks[1]);
 
+        case OP_BG:
+            return handle_bg(blocks[0]);
+
         case OP_NONE:
             return handle_op_none(blocks[0]);
     }
@@ -190,6 +217,13 @@ int hsh_launch(char **args){
 
     pid = fork();
     if(pid == 0){
+        setpgid(0, 0);
+
+        struct sigaction sa = {0};
+        sa.sa_handler = SIG_DFL;
+        sigaction(SIGTSTP, &sa, NULL);
+        sigaction(SIGINT, &sa, NULL);
+
         execvp(args[0], args);
         fprintf(stderr, "hsh: %s: command not found\n", args[0]);
         exit(EXIT_FAILURE);
@@ -199,7 +233,12 @@ int hsh_launch(char **args){
         return 1;
     }
     else{
-        waitpid(pid, &status, 0);
+        setpgid(pid, pid);
+        tcsetpgrp(STDIN_FILENO, pid);
+
+        waitpid(pid, &status, WUNTRACED);
+        signal(SIGTTOU, SIG_IGN);
+        tcsetpgrp(STDIN_FILENO, getpgid(0));
     }
 
     if(WIFEXITED(status)){
@@ -248,7 +287,6 @@ Operator parse_ops(char *line, int *opcount){
     Operator op = OP_NONE;
     for(int i = 0; line[i] != '\0'; i++){
         if(line[i] == '|'){
-
             if(line[i + 1] && line[i + 1] == '|'){
                 if(op != OP_NONE){
                     fprintf(stderr, "hsh: Invalid operator sequence\n");
@@ -282,6 +320,13 @@ Operator parse_ops(char *line, int *opcount){
                 op = OP_AND;
                 count++;
                 i++;
+            }
+            else{
+                if(op != OP_NONE){
+                    fprintf(stderr, "hsh: Invalid operator sequence\n");
+                }
+                op = OP_BG;
+                count++;
             }
         }
     }
@@ -558,4 +603,41 @@ int exec_builtin(char **args, int index){
     if(args == NULL || index < 0) return 1;
 
     return builtin_func[index](args);
+}
+
+int handle_bg(char *block){
+    char **args = parse_block(block);
+
+    int idx = is_builtin(args[0]);
+    if(idx >= 0){
+        return exec_builtin(args, idx);
+    }
+
+    pid_t pid = fork();
+    int status;
+    if(pid == 0){
+        setpgid(0, 0);
+
+        execvp(args[0], args);
+        exit(EXIT_FAILURE);
+    }
+    else if(pid < 0){
+        fprintf(stderr, "hsh: Error forking\n");
+        return 1;
+    }
+    else{
+        setpgid(pid, pid);
+
+        waitpid(pid, &status, WNOHANG);
+
+        signal(SIGTTOU, SIG_IGN);
+        tcsetpgrp(STDIN_FILENO, getpgid(0));
+    }
+
+    if(WIFEXITED(status)){
+        return WEXITSTATUS(status);
+    }
+
+    //Not an error, the proc might still be running.
+    return 1;
 }
