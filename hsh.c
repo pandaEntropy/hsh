@@ -33,6 +33,7 @@ int hsh_exit(char **args);
 int hsh_execute_line(char **args, Operator op, int opcount);
 int hsh_num_builtins();
 int hsh_launch(char **args);
+void hsh_cleanup();
 
 Operator parse_ops(char *line, int *opcount);
 char **parse_block(char *block);
@@ -51,6 +52,24 @@ int exec_builtin(char **args, int index);
 char *builtin_str[] = {"cd", "help", "exit", "undo"};
 int (*builtin_func[])(char **) = {hsh_cd,  hsh_help, hsh_exit, undo};
 
+pid_t bg_jobs[120];
+int bg_count = 0;
+
+void sigchld_handler(int signum){
+    (void)signum;
+
+    if(bg_count == 0) return;
+    int status;
+    int tmp_count = bg_count;
+
+    for(int i = 0; i < tmp_count; i++){
+        if(waitpid(bg_jobs[i], &status, WNOHANG) > 0){
+            bg_jobs[i] = bg_jobs[bg_count - 1];
+            bg_count--;
+        }
+    }
+}
+
 void init_sigs(){
     struct sigaction ign_sig = {0};
     ign_sig.sa_handler = SIG_IGN;
@@ -58,16 +77,13 @@ void init_sigs(){
 
     sigaction(SIGTSTP, &ign_sig, NULL);
     sigaction(SIGINT, &ign_sig, NULL);
-    sigaction(SIGCHLD, &ign_sig, NULL); //By ignoring, the OS reaps the children
+
+    struct sigaction sigchld = {0};
+    sigchld.sa_flags = SA_RESTART;
+    sigchld.sa_handler = sigchld_handler;
+
+    sigaction(SIGCHLD, &sigchld, NULL);
 }
-
-/*
- * TODO
- *Figure out the error handling system with all these error codes
- *Clean up the code
-*/
-
-
 
 int main(){
 
@@ -80,7 +96,7 @@ int main(){
 
     hsh_loop();
 
-    mem_cleanup();
+    hsh_cleanup();
 
     return EXIT_SUCCESS;
 }
@@ -292,10 +308,12 @@ Operator parse_ops(char *line, int *opcount){
                     fprintf(stderr, "hsh: Invalid operator sequence\n");
                     return -1;
                 }
+
                 op = OP_OR;
                 count++;
                 i++;
                 continue;
+
             }
             op = OP_PIPE;
             count++;
@@ -638,6 +656,21 @@ int handle_bg(char *block){
         return WEXITSTATUS(status);
     }
 
-    //Not an error, the proc might still be running.
+    bg_jobs[bg_count] = pid;
+    bg_count++;
+
     return 1;
+}
+
+void hsh_cleanup(){
+    mem_cleanup();
+
+    for(int i = 0; i < bg_count; i++){
+        kill(-bg_jobs[i], SIGTERM);
+    }
+
+    int stat;
+    while(waitpid(-1, &stat, WNOHANG) != -1){
+        continue;
+    }
 }

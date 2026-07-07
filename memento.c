@@ -170,6 +170,7 @@ void create_creatmem(char **args, size_t char_count, int argc, HollowMemento *ho
 
 void create_movmem(char **args, size_t char_count, int argc, HollowMemento *holmem){
     (void)argc;
+    (void)char_count;
 
     size_t movmem_sz = sizeof(MoveMemento);
     size_t str_sz = (strlen(args[1]) + strlen(args[2]) + 2) * 2;
@@ -362,8 +363,8 @@ void free_movmem(MoveMemento *movmem){
 }
 
 void free_delmem(DeleteMemento *delmem){
-    if(delmem->tfiles[0].trash_path != NULL){
-        for(int i = 0; i < delmem->num_paths; i++){
+    for(int i = 0; i < delmem->num_paths; i++){
+        if(delmem->tfiles[i].trash_path !=  NULL){
             unlink(delmem->tfiles[i].trash_path);
         }
     }
