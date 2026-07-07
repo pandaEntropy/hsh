@@ -50,17 +50,17 @@ State rollback is achieved by adapting the Memento pattern.
 
 * *hsh* adapts the Memento design pattern to achieve state rollback. Alterations had to be made to better suit the low-level C environment as the pattern itself was designed for object oriented programming.
 
-There are designated command categories according to which arguments are parsed. The parsed command category is then matched to the according memento type. There are 4 memento types: Create, Move, Delete, Internal and Hollow. Arguments are passed down to the dedicated memento creating function, which is the originator.
+* There are designated command categories according to which arguments are parsed. The parsed command category is then matched to the according memento type. There are 5 memento types: Create, Move, Delete, Internal and Hollow. Arguments are passed down to the dedicated memento creating function, which is the originator.
 
-Since mementos have to allocate space for numerous fields with the same lifetime, arena allocation is heavily utilized to optimize memento creation.
+* Since mementos have to allocate space for numerous fields with the same lifetime, arena allocation is heavily utilized to optimize memento creation.
 
-Mementos are stores in an array, which functions as the undo stack. The Hollow type was introduced here to store a pointer to the memento as well as the type of the memento. The type is required later to unpack the Hollow memento.
+* Mementos are stores in an array, which functions as the undo stack. The Hollow type was introduced here to store a pointer to the memento as well as the type of the memento. The type is required later to unpack the Hollow memento.
 
-Hollow mementos are staged right before a command is executed, and are only pushed on the undo stack after a successful execution.
+* Hollow mementos are staged right before a command is executed, and are only pushed on the undo stack after a successful execution.
 
-When `undo` is executed, the top memento is popped from the stack. It is then unpacked and the dedicated rollback function is executed based on the memento type inside.
+* When `undo` is executed, the top memento is popped from the stack. It is then unpacked and the dedicated rollback function is executed based on the memento type inside.
 
-Restoring destructive commands is possible with a trash directory located in `~/.local/share/hsh/trash`, as it is required for preserving file content. Trash is cleaned on exit.
+* Restoring destructive commands is possible with a trash directory located in `~/.local/share/hsh/trash`, as it is required for preserving file content. Trash is cleaned on exit.
 
 ## Current Limitations and Future Work
 
