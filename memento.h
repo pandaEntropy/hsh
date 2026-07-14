@@ -1,3 +1,4 @@
+/*
 #ifndef MEMENTO_H
 #define MEMENTO_H
 
@@ -32,3 +33,4 @@ void free_holmem(HollowMemento holmem);
 void mem_cleanup();
 
 #endif
+*/

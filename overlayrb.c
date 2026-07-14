@@ -4,6 +4,10 @@
 #include <dirent.h>
 #include <string.h>
 #include <sys/sysmacros.h>
+#include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/sendfile.h>
 
 #define MAX_FNAME 256
 
@@ -32,6 +36,7 @@ typedef struct HollowMemento{
 }HollowMemento;
 
 char *hshdir = "/var/lib/hsh/";
+char trashdir[PATH_MAX];
 
 char *workdir = "/var/lib/hsh/work/";
 char *upperdir = "/var/lib/hsh/upper/";
@@ -40,6 +45,8 @@ char *lowerdir = "/";
 
 void reap_dir(const char *dir_path, HollowMemento *holmem);
 Action find_action(const char *upper_path);
+Memento *create_mem(Action action, const char *upper_path);
+char *trash(const char *lower_path);
 
 //TODO maybe leaving the timestamps untouched is better?
 
@@ -56,6 +63,33 @@ int init_ovl_dirs(){
     mkdir(workdir, 0700);
     mkdir(upperdir, 0700);
     mkdir(mergeddir, 0700);
+
+    srand(time(NULL));
+
+    char *home = getenv("HOME");
+    if(home != NULL){
+        char shell_dir[PATH_MAX];
+        snprintf(shell_dir, sizeof(shell_dir), "%s/.local/share/hsh", home);
+
+        struct stat st;
+        if(stat(shell_dir, &st) != 0){
+            mkdir(shell_dir, 0700);
+        }
+        else if(S_ISDIR(st.st_mode) == 0){
+            fprintf(stderr, "hsh: Failed to create shell directory. A file with the same name exists\n");
+            return 1;
+        }
+
+        snprintf(trashdir, sizeof(trashdir), "%s/.local/share/hsh/trash", home);
+
+        if(stat(trashdir, &st) != 0){
+            mkdir(trashdir, 0700);
+        }
+        else if(S_ISDIR(st.st_mode) == 0){
+            fprintf(stderr, "hsh: Failed to create shell trash directory. A file with the same name exists\n");
+            return 1;
+        }
+    }
 
     return 0;
 }
@@ -88,7 +122,8 @@ void reap_dir(const char *dir_path, HollowMemento *holmem){
         }
         else{
             Action action = find_action(abs_path);
-            
+            Memento *memento = create_mem(action, abs_path);
+            //now commit TODO and dont forget to cleanup upperdir (mergeddir is cleaned automatically)
         }
     }
 }
@@ -150,7 +185,7 @@ Memento *create_mem(Action action, const char *upper_path){
 
         case F_WRITE:
         case F_DELETE:{
-            //mem->tpath = trash(lower_path);
+            mem->tpath = trash(lower_path);
 
             struct stat st;
             if(lstat(lower_path, &st) != 0){
@@ -184,4 +219,40 @@ Memento *create_mem(Action action, const char *upper_path){
     }
 
     return NULL;
+}
+
+char *trash(const char *lower_path){
+    char chars[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+    char rname[9];
+
+    for(int i = 0; i < 8; i++){
+        int rindex = rand() % strlen(chars);
+        rname[i] = chars[rindex];
+    }
+
+    rname[8] = '\0';
+
+    char tfile[PATH_MAX];
+    snprintf(tfile, sizeof(tfile), "%s/%s", trashdir, rname);
+
+    struct stat fstat;
+    if(stat(lower_path, &fstat) != 0){
+        tfile[0] = '\0';
+        return NULL;
+    }
+
+    int src_fd = open(lower_path, O_RDONLY);
+    int dest_fd = open(tfile, O_TRUNC | O_WRONLY | O_CREAT, 0600);
+    off_t copied = 0;
+    off_t remaining = fstat.st_size;
+
+    while(remaining > 0){
+        ssize_t written = sendfile(dest_fd, src_fd, &copied, remaining);
+        remaining -= written;
+    }
+
+    close(src_fd);
+    close(dest_fd);
+
+    return strdup(tfile);
 }
