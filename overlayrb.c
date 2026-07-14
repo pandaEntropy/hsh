@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <dirent.h>
 #include <string.h>
+#include <sys/sysmacros.h>
 
 #define MAX_FNAME 256
 
@@ -11,17 +12,23 @@ typedef enum Action{
     F_DELETE,
     F_WRITE,
     DIR_CREATE,
-    DIR_DELETE
+    DIR_DELETE,
+    DIR_MOD,
+    ACT_INV
 }Action;
 
 typedef struct Memento{
     char *path;
+    char *tpath;
+    mode_t mode;
+    uid_t uid;
+    gid_t gid;
+
     Action action;
-    //maybe you could have the trash file path here as well? It would be NULL if not needed
 }Memento;
 
 typedef struct HollowMemento{
-    Memento mementos[];
+    Memento **mementos;
 }HollowMemento;
 
 char *hshdir = "/var/lib/hsh/";
@@ -32,6 +39,7 @@ char *mergeddir = "/var/lib/hsh/merged/";
 char *lowerdir = "/";
 
 void reap_dir(const char *dir_path, HollowMemento *holmem);
+Action find_action(const char *upper_path);
 
 //TODO maybe leaving the timestamps untouched is better?
 
@@ -79,25 +87,101 @@ void reap_dir(const char *dir_path, HollowMemento *holmem){
             }
         }
         else{
-            //reap the file and also commit it here
+            Action action = find_action(abs_path);
+            
         }
     }
 }
 
-//path should be the path relative to upperdir.
-//If it was abs path, it would give the file in upperdir when I stat it. But I need the actual one in lowerdir.
-//TODO you might need to prepend a "/" to path
-Action find_action(const char *path, struct dirent *entry){
-    struct stat st;
-    if(stat(path, &st) != 0){ //Not in lowerdir
-        if(entry->d_type == DT_DIR){
+//upper_path is for stat-ing files in upperdir, lower_path is for stat-ing files in lowerdir 
+Action find_action(const char *upper_path){
+    size_t lower_sz = strlen(upper_path); //this will leave some extra space
+    char lower_path[lower_sz];
+
+    snprintf(lower_path, lower_sz, "%s", upper_path + strlen(upperdir) - 1);
+
+    struct stat st_upper, st_lower;
+    if(lstat(upper_path, &st_upper) != 0){
+        return ACT_INV;
+    }
+
+    if(lstat(lower_path, &st_lower) != 0){
+        if(S_ISDIR(st_upper.st_mode)){
             return DIR_CREATE;
         }
         else{
             return F_CREATE;
         }
     }
-
-    return F_WRITE;
+    else if(S_ISCHR(st_upper.st_mode) && (major(st_upper.st_rdev) == 0 && minor(st_upper.st_rdev) == 0)){
+        if(S_ISDIR(st_lower.st_mode)){
+            return DIR_DELETE;
+        }
+        else{
+            return F_DELETE;
+        }
+    }
+    else{
+        if(S_ISDIR(st_upper.st_mode)){
+            return DIR_MOD;
+        }
+        else{
+            return F_WRITE;
+        }
+    }
 }
-//TODO pick up from character devices and whiteouts
+
+Memento *create_mem(Action action, const char *upper_path){
+    Memento *mem = malloc(sizeof(Memento));
+
+    size_t lower_sz = strlen(upper_path);
+    char lower_path[lower_sz];
+
+    snprintf(lower_path, lower_sz, "%s", upper_path + strlen(upperdir) - 1);
+
+    mem->path = strdup(lower_path);
+    mem->action = action;
+    switch(action){
+        case F_CREATE:
+            break;
+
+        case DIR_CREATE:
+            break;
+
+        case F_WRITE:
+        case F_DELETE:{
+            //mem->tpath = trash(lower_path);
+
+            struct stat st;
+            if(lstat(lower_path, &st) != 0){
+                return NULL;
+            }
+
+            mem->mode = st.st_mode & 07777;
+            mem->uid = st.st_uid;
+            mem->gid = st.st_gid;
+
+            break;
+        }
+
+        case DIR_DELETE:
+        case DIR_MOD:{
+            struct stat st;
+            if(lstat(lower_path, &st) != 0){
+                free(mem);
+                return NULL;
+            }
+
+            mem->mode = st.st_mode & 07777;
+            mem->uid = st.st_uid;
+            mem->gid = st.st_gid;
+
+            break;
+        }
+
+        case ACT_INV:
+            return NULL;
+    }
+
+    return NULL;
+}
