@@ -46,7 +46,10 @@ char *lowerdir = "/";
 void reap_dir(const char *dir_path, HollowMemento *holmem);
 Action find_action(const char *upper_path);
 Memento *create_mem(Action action, const char *upper_path);
+int commit(const char *upper_path, Action action);
+
 char *trash(const char *lower_path);
+int fcopy(const char *src, const char *dest);
 
 //TODO maybe leaving the timestamps untouched is better?
 
@@ -123,7 +126,7 @@ void reap_dir(const char *dir_path, HollowMemento *holmem){
         else{
             Action action = find_action(abs_path);
             Memento *memento = create_mem(action, abs_path);
-            //now commit TODO and dont forget to cleanup upperdir (mergeddir is cleaned automatically)
+            commit(abs_path, action);
         }
     }
 }
@@ -235,14 +238,84 @@ char *trash(const char *lower_path){
     char tfile[PATH_MAX];
     snprintf(tfile, sizeof(tfile), "%s/%s", trashdir, rname);
 
-    struct stat fstat;
-    if(stat(lower_path, &fstat) != 0){
+    if(fcopy(lower_path, tfile) != 0){
         tfile[0] = '\0';
         return NULL;
     }
 
-    int src_fd = open(lower_path, O_RDONLY);
-    int dest_fd = open(tfile, O_TRUNC | O_WRONLY | O_CREAT, 0600);
+    return strdup(tfile);
+}
+
+int commit(const char *upper_path, Action action){
+    size_t lower_sz = strlen(upper_path);
+    char lower_path[lower_sz];
+
+    snprintf(lower_path, lower_sz, "%s", upper_path + strlen(upperdir) - 1);
+    
+    struct stat st;
+    if(lstat(upper_path, &st) != 0){
+        return 1;
+    }
+
+    switch(action){
+        case F_CREATE:{
+            if(fcopy(upper_path, lower_path) != 0){
+                return 1;
+            }
+
+            mode_t mode = st.st_mode & 07777;
+            chmod(lower_path, mode);
+            chown(lower_path, st.st_uid, st.st_gid);
+            break;
+        }
+
+        case F_DELETE:
+            unlink(lower_path);
+            break;
+
+        case DIR_DELETE:
+            rmdir(lower_path);
+            break;
+
+        case DIR_CREATE:{
+            mode_t mode = st.st_mode & 07777;
+            mkdir(lower_path, mode);
+            chown(lower_path, st.st_uid, st.st_gid);
+            break;
+        }
+
+        case DIR_MOD:{
+            mode_t mode = st.st_mode & 07777;
+            chmod(lower_path, mode);
+            chown(lower_path, st.st_uid, st.st_gid);
+            break;
+        }
+
+        case F_WRITE:{
+            if(fcopy(upper_path, lower_path) != 0){
+                return 1;
+            }
+
+            chmod(lower_path, st.st_mode & 07777);
+            chown(lower_path, st.st_uid, st.st_gid);
+            break;
+        }
+
+        case ACT_INV:
+            return 1;
+    }
+
+    return 0;
+}
+
+int fcopy(const char *src, const char *dest){
+    struct stat fstat;
+    if(stat(src, &fstat) != 0){
+        return 1;
+    }
+
+    int src_fd = open(src, O_RDONLY);
+    int dest_fd = open(dest, O_TRUNC | O_WRONLY | O_CREAT, 0600);
     off_t copied = 0;
     off_t remaining = fstat.st_size;
 
@@ -254,5 +327,5 @@ char *trash(const char *lower_path){
     close(src_fd);
     close(dest_fd);
 
-    return strdup(tfile);
+    return 0;
 }
