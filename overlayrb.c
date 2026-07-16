@@ -10,6 +10,7 @@
 #include <sys/sendfile.h>
 
 #define MAX_FNAME 256
+#define MAX_USTACK 30
 
 typedef enum Action{
     F_CREATE,
@@ -44,16 +45,20 @@ char *upperdir = "/var/lib/hsh/upper/";
 char *mergeddir = "/var/lib/hsh/merged/";
 char *lowerdir = "/";
 
+HollowMemento *ustack[MAX_USTACK];
+int utop = -1;
+
 void reap_dir(const char *dir_path, HollowMemento *holmem);
 Action find_action(const char *upper_path);
 Memento *create_mem(Action action, const char *upper_path);
 int commit(const char *upper_path, Action action);
-int push(HollowMemento *holmem, Memento *mem);
+int push_memstack(HollowMemento *holmem, Memento *mem);
+void push_ustack(HollowMemento *holmem);
+void free_holmem(HollowMemento *holmem);
+void free_mem(Memento *mem);
 
 char *trash(const char *lower_path);
 int fcopy(const char *src, const char *dest);
-
-//TODO maybe leaving the timestamps untouched is better?
 
 int init_ovl_dirs(){
     struct stat st;
@@ -107,8 +112,11 @@ int init_ovl_dirs(){
 
 void reap_overlay(){
     HollowMemento *holmem = calloc(1, sizeof(HollowMemento));
+    holmem->top = -1;
 
     reap_dir(upperdir, holmem);
+
+    push_memstack(holmem, NULL);
 }
 
 void reap_dir(const char *dir_path, HollowMemento *holmem){
@@ -123,7 +131,7 @@ void reap_dir(const char *dir_path, HollowMemento *holmem){
             if(strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0){
                 Action action = find_action(abs_path);
                 Memento *memento = create_mem(action, abs_path);
-                push(holmem, memento);
+                push_memstack(holmem, memento);
                 commit(abs_path, action);
 
                 reap_dir(abs_path, holmem);
@@ -134,7 +142,7 @@ void reap_dir(const char *dir_path, HollowMemento *holmem){
         else{
             Action action = find_action(abs_path);
             Memento *memento = create_mem(action, abs_path);
-            push(holmem, memento);
+            push_memstack(holmem, memento);
             commit(abs_path, action);
             unlink(abs_path);
         }
@@ -298,8 +306,8 @@ int commit(const char *upper_path, Action action){
     return 0;
 }
 
-int push(HollowMemento *holmem, Memento *mem){
-    if(holmem->top >= holmem->size){
+int push_memstack(HollowMemento *holmem, Memento *mem){
+    if(holmem->top >= holmem->size - 1){
         holmem->size = holmem->size == 0 ? 4 : holmem->size * 2;
 
         Memento **tmp = realloc(holmem->mementos, sizeof(Memento*) * holmem->size);
@@ -310,10 +318,40 @@ int push(HollowMemento *holmem, Memento *mem){
         holmem->mementos = tmp;
     }
 
-    holmem->mementos[holmem->top] = mem;
     holmem->top++;
+    holmem->mementos[holmem->top] = mem;
 
     return 0;
+}
+
+void push_ustack(HollowMemento *holmem){
+    if(utop >= MAX_USTACK - 1){
+        free_holmem(ustack[0]);
+
+        for(int i = 0; i < MAX_USTACK - 1; i++){
+            ustack[i] = ustack[i + 1];
+        }
+
+        utop = MAX_USTACK - 1;
+        ustack[utop] = holmem;
+    }
+    else{
+        utop++;
+        ustack[utop] = holmem;
+    }
+
+}
+
+void free_holmem(HollowMemento *holmem){
+    while(holmem->top >= 0){
+        free_mem(holmem->mementos[holmem->top]);
+        holmem->top--;
+    }
+}
+
+void free_mem(Memento *mem){
+    free(mem->path);
+    free(mem->tpath);
 }
 
 char *trash(const char *lower_path){
