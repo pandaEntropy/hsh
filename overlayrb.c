@@ -27,12 +27,13 @@ typedef struct Memento{
     mode_t mode;
     uid_t uid;
     gid_t gid;
-
     Action action;
 }Memento;
 
 typedef struct HollowMemento{
     Memento **mementos;
+    int top;
+    size_t size;
 }HollowMemento;
 
 char *hshdir = "/var/lib/hsh/";
@@ -47,6 +48,7 @@ void reap_dir(const char *dir_path, HollowMemento *holmem);
 Action find_action(const char *upper_path);
 Memento *create_mem(Action action, const char *upper_path);
 int commit(const char *upper_path, Action action);
+int push(HollowMemento *holmem, Memento *mem);
 
 char *trash(const char *lower_path);
 int fcopy(const char *src, const char *dest);
@@ -104,7 +106,7 @@ int init_ovl_dirs(){
 //push on the stack
 
 void reap_overlay(){
-    HollowMemento *holmem = malloc(sizeof(HollowMemento));
+    HollowMemento *holmem = calloc(1, sizeof(HollowMemento));
 
     reap_dir(upperdir, holmem);
 }
@@ -119,16 +121,26 @@ void reap_dir(const char *dir_path, HollowMemento *holmem){
 
         if(entry->d_type == DT_DIR){
             if(strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0){
+                Action action = find_action(abs_path);
+                Memento *memento = create_mem(action, abs_path);
+                push(holmem, memento);
+                commit(abs_path, action);
+
                 reap_dir(abs_path, holmem);
-                //reap the directory itself here and commit after recursion ends
+
+                rmdir(abs_path);
             }
         }
         else{
             Action action = find_action(abs_path);
             Memento *memento = create_mem(action, abs_path);
+            push(holmem, memento);
             commit(abs_path, action);
+            unlink(abs_path);
         }
     }
+
+    closedir(dir);
 }
 
 //upper_path is for stat-ing files in upperdir, lower_path is for stat-ing files in lowerdir 
@@ -224,34 +236,12 @@ Memento *create_mem(Action action, const char *upper_path){
     return NULL;
 }
 
-char *trash(const char *lower_path){
-    char chars[] = "0123456789abcdefghijklmnopqrstuvwxyz";
-    char rname[9];
-
-    for(int i = 0; i < 8; i++){
-        int rindex = rand() % strlen(chars);
-        rname[i] = chars[rindex];
-    }
-
-    rname[8] = '\0';
-
-    char tfile[PATH_MAX];
-    snprintf(tfile, sizeof(tfile), "%s/%s", trashdir, rname);
-
-    if(fcopy(lower_path, tfile) != 0){
-        tfile[0] = '\0';
-        return NULL;
-    }
-
-    return strdup(tfile);
-}
-
 int commit(const char *upper_path, Action action){
     size_t lower_sz = strlen(upper_path);
     char lower_path[lower_sz];
 
     snprintf(lower_path, lower_sz, "%s", upper_path + strlen(upperdir) - 1);
-    
+
     struct stat st;
     if(lstat(upper_path, &st) != 0){
         return 1;
@@ -306,6 +296,46 @@ int commit(const char *upper_path, Action action){
     }
 
     return 0;
+}
+
+int push(HollowMemento *holmem, Memento *mem){
+    if(holmem->top >= holmem->size){
+        holmem->size = holmem->size == 0 ? 4 : holmem->size * 2;
+
+        Memento **tmp = realloc(holmem->mementos, sizeof(Memento*) * holmem->size);
+        if(tmp == NULL){
+            return 1;
+        }
+
+        holmem->mementos = tmp;
+    }
+
+    holmem->mementos[holmem->top] = mem;
+    holmem->top++;
+
+    return 0;
+}
+
+char *trash(const char *lower_path){
+    char chars[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+    char rname[9];
+
+    for(int i = 0; i < 8; i++){
+        int rindex = rand() % strlen(chars);
+        rname[i] = chars[rindex];
+    }
+
+    rname[8] = '\0';
+
+    char tfile[PATH_MAX];
+    snprintf(tfile, sizeof(tfile), "%s/%s", trashdir, rname);
+
+    if(fcopy(lower_path, tfile) != 0){
+        tfile[0] = '\0';
+        return NULL;
+    }
+
+    return strdup(tfile);
 }
 
 int fcopy(const char *src, const char *dest){
