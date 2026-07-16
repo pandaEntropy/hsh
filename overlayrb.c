@@ -52,8 +52,12 @@ void reap_dir(const char *dir_path, HollowMemento *holmem);
 Action find_action(const char *upper_path);
 Memento *create_mem(Action action, const char *upper_path);
 int commit(const char *upper_path, Action action);
+void undo();
+void undo_mem(Memento *mem);
+
 int push_memstack(HollowMemento *holmem, Memento *mem);
 void push_ustack(HollowMemento *holmem);
+void pop_ustack();
 void free_holmem(HollowMemento *holmem);
 void free_mem(Memento *mem);
 
@@ -116,7 +120,7 @@ void reap_overlay(){
 
     reap_dir(upperdir, holmem);
 
-    push_memstack(holmem, NULL);
+    push_ustack(holmem);
 }
 
 void reap_dir(const char *dir_path, HollowMemento *holmem){
@@ -306,6 +310,54 @@ int commit(const char *upper_path, Action action){
     return 0;
 }
 
+void undo(){
+    HollowMemento *holmem = ustack[utop];
+
+    while(holmem->top >= 0){
+        undo_mem(holmem->mementos[holmem->top]);
+    }
+
+    pop_ustack();
+}
+
+void undo_mem(Memento *mem){
+    switch(mem->action){
+        case F_CREATE:
+            unlink(mem->path);
+            break;
+
+        case DIR_CREATE:
+            rmdir(mem->path);
+            break;
+
+        case F_DELETE:
+            fcopy(mem->tpath, mem->path);
+            lchown(mem->path, mem->uid, mem->gid);
+            chmod(mem->path, mem->mode);
+            break;
+
+        case DIR_DELETE:
+            mkdir(mem->path, mem->mode);
+            chown(mem->path, mem->uid, mem->gid);
+            chmod(mem->path, mem->mode);
+            break;
+
+        case DIR_MOD:
+            chown(mem->path, mem->uid, mem->gid);
+            chmod(mem->path, mem->mode);
+            break;
+
+        case F_WRITE:
+            fcopy(mem->tpath, mem->path);
+            lchown(mem->path, mem->uid, mem->gid);
+            chmod(mem->path, mem->mode);
+            break;
+
+        case ACT_INV:
+            break;
+    }
+}
+
 int push_memstack(HollowMemento *holmem, Memento *mem){
     if(holmem->top >= holmem->size - 1){
         holmem->size = holmem->size == 0 ? 4 : holmem->size * 2;
@@ -342,16 +394,26 @@ void push_ustack(HollowMemento *holmem){
 
 }
 
+void pop_ustack(){
+    if(utop < 0) return;
+
+    free_holmem(ustack[utop]);
+    utop--;
+}
+
 void free_holmem(HollowMemento *holmem){
     while(holmem->top >= 0){
         free_mem(holmem->mementos[holmem->top]);
         holmem->top--;
     }
+
+    free(holmem->mementos);
 }
 
 void free_mem(Memento *mem){
     free(mem->path);
     free(mem->tpath);
+    free(mem);
 }
 
 char *trash(const char *lower_path){
