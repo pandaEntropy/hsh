@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+#include <sched.h>
 #include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +10,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/sendfile.h>
+#include <sys/mount.h>
+#include <limits.h>
 
 #define MAX_FNAME 256
 #define MAX_USTACK 30
@@ -37,22 +41,24 @@ typedef struct HollowMemento{
     size_t size;
 }HollowMemento;
 
-char *hshdir = "/var/lib/hsh/";
+char *hshdir = "/hsh/";
 char trashdir[PATH_MAX];
 
-char *workdir = "/var/lib/hsh/work/";
-char *upperdir = "/var/lib/hsh/upper/";
-char *mergeddir = "/var/lib/hsh/merged/";
-char *lowerdir = "/";
+char *upperdir_root = "/hsh/upper_root";
+char *workdir_root  = "/hsh/work_root";
+
+char *upperdir_home = "/hsh/upper_home";
+char *workdir_home  = "/hsh/work_home";
+
+char *mergeddir = "/hsh/merged";
 
 HollowMemento *ustack[MAX_USTACK];
 int utop = -1;
 
-void reap_dir(const char *dir_path, HollowMemento *holmem);
-Action find_action(const char *upper_path);
-Memento *create_mem(Action action, const char *upper_path);
-int commit(const char *upper_path, Action action);
-void undo();
+void reap_dir(const char *dir_path, const char *upperdir, const char *base, HollowMemento *holmem);
+Action find_action(const char *upper_path, const char *upperdir, const char *base);
+Memento *create_mem(Action action, const char *upper_path, const char *upperdir, const char *base);
+int commit(const char *upper_path, Action action, const char *upperdir, const char *base);
 void undo_mem(Memento *mem);
 
 int push_memstack(HollowMemento *holmem, Memento *mem);
@@ -63,19 +69,96 @@ void free_mem(Memento *mem);
 
 char *trash(const char *lower_path);
 int fcopy(const char *src, const char *dest);
+void get_lowpath(const char *up_path, char *low_path, size_t low_sz, const char *base, const char *upperdir);
+int is_noise(const char *path);
 
-int init_ovl_dirs(){
-    struct stat st;
-    if(stat(hshdir, &st) != 0){
-        mkdir(hshdir, 0700);
-    }
-    else if(S_ISDIR(st.st_mode) == 0){
-        fprintf(stderr, "hsh: Failed to create shell directory. A file with the same name exists\n");
+int init_ns(uid_t uid, gid_t gid){
+    char buf[128];
+
+    if(unshare(CLONE_NEWNS) != 0){
+        perror("hsh: unshare failed");
         return 1;
     }
 
-    mkdir(workdir, 0700);
-    mkdir(upperdir, 0700);
+    if(mount(NULL, "/", NULL, MS_PRIVATE | MS_REC, NULL) != 0){
+        perror("hsh: failed to make mounts private");
+        return 1;
+    }
+
+    int fd = open("/proc/self/setgroups", O_WRONLY);
+    write(fd, "deny", 4);
+    close(fd);
+
+    snprintf(buf, sizeof(buf), "0 %d 1", uid);
+    fd = open("/proc/self/uid_map", O_WRONLY);
+    write(fd, buf, strlen(buf));
+    close(fd);
+
+    snprintf(buf, sizeof(buf), "0 %d 1", gid);
+    fd = open("/proc/self/gid_map", O_WRONLY);
+    write(fd, buf, strlen(buf));
+    close(fd);
+
+    return 0;
+}
+
+int init_child_ovl(uid_t uid, gid_t gid){
+    char cwd_buf[PATH_MAX];
+
+    if(getcwd(cwd_buf, sizeof(cwd_buf)) == NULL){
+        fprintf(stderr, "hsh: failed to get current directory\n");
+        return 1;
+    }
+
+    if(init_ns(uid, gid) != 0){
+        fprintf(stderr, "hsh: failed to setup user namespace\n");
+        return 1;
+    }
+
+    char opts[PATH_MAX * 4];
+    snprintf(opts, sizeof(opts), "lowerdir=/,upperdir=%s,workdir=%s", upperdir_root, workdir_root);
+
+    if(mount("overlay", mergeddir, "overlay", 0, opts) != 0){
+        perror("hsh: failed to mount overlay");
+        return 1;
+    }
+
+    char opts_home[PATH_MAX * 4];
+    snprintf(opts_home, sizeof(opts_home), "lowerdir=/home,upperdir=%s,workdir=%s", 
+             upperdir_home, workdir_home);
+
+    char home_target[PATH_MAX];
+    snprintf(home_target, sizeof(home_target), "%s/home", mergeddir);
+
+    mkdir(home_target, 0700);
+
+    if(mount("overlay", home_target, "overlay", 0, opts_home) != 0){
+        perror("hsh: failed to mount home overlay");
+    }
+
+    mount("/proc", "/hsh/merged/proc", NULL, MS_BIND | MS_REC, NULL);
+    mount("/dev", "/hsh/merged/dev", NULL, MS_BIND | MS_REC, NULL);
+    mount("/sys", "/hsh/merged/sys", NULL, MS_BIND | MS_REC, NULL);
+
+    if(chdir(mergeddir) != 0 || chroot(".") != 0){
+        fprintf(stderr, "hsh: chroot failed\n");
+        return 1;
+    }
+
+    if( chdir(cwd_buf) != 0){
+        fprintf(stderr, "failed to chdir into pwd\n");
+    }
+    setenv("PWD", cwd_buf, 1);
+
+    return 0;
+}
+
+
+int init_ovl_dirs(){
+    mkdir(workdir_root, 0700);
+    mkdir(workdir_home, 0700);
+    mkdir(upperdir_root, 0700);
+    mkdir(upperdir_home, 0700);
     mkdir(mergeddir, 0700);
 
     srand(time(NULL));
@@ -90,7 +173,7 @@ int init_ovl_dirs(){
             mkdir(shell_dir, 0700);
         }
         else if(S_ISDIR(st.st_mode) == 0){
-            fprintf(stderr, "hsh: Failed to create shell directory. A file with the same name exists\n");
+            fprintf(stderr, "hsh: Failed to create shell trash directory. A file with the same name exists\n");
             return 1;
         }
 
@@ -108,22 +191,17 @@ int init_ovl_dirs(){
     return 0;
 }
 
-//iterate through upperdir
-//on every file/dir run a helper which will return the Action type
-//create the Memento, store the path and the action type
-//wrap the holmem around the memento(s)
-//push on the stack
-
 void reap_overlay(){
     HollowMemento *holmem = calloc(1, sizeof(HollowMemento));
     holmem->top = -1;
 
-    reap_dir(upperdir, holmem);
+    reap_dir(upperdir_root, upperdir_root, "/", holmem);
+    reap_dir(upperdir_home, upperdir_home, "/home", holmem);
 
     push_ustack(holmem);
 }
 
-void reap_dir(const char *dir_path, HollowMemento *holmem){
+void reap_dir(const char *dir_path, const char *upperdir, const char *base, HollowMemento *holmem){
     DIR *dir = opendir(dir_path);
 
     struct dirent *entry = NULL;
@@ -131,23 +209,27 @@ void reap_dir(const char *dir_path, HollowMemento *holmem){
         char abs_path[MAX_FNAME];
         snprintf(abs_path, MAX_FNAME, "%s/%s", dir_path, entry->d_name);
 
+        if(is_noise(abs_path)){
+            continue;
+        }
+
         if(entry->d_type == DT_DIR){
             if(strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0){
-                Action action = find_action(abs_path);
-                Memento *memento = create_mem(action, abs_path);
+                Action action = find_action(abs_path, upperdir, base);
+                Memento *memento = create_mem(action, abs_path, upperdir, base);
                 push_memstack(holmem, memento);
-                commit(abs_path, action);
+                commit(abs_path, action, upperdir, base);
 
-                reap_dir(abs_path, holmem);
+                reap_dir(abs_path, upperdir, base, holmem);
 
                 rmdir(abs_path);
             }
         }
         else{
-            Action action = find_action(abs_path);
-            Memento *memento = create_mem(action, abs_path);
+            Action action = find_action(abs_path, upperdir, base);
+            Memento *memento = create_mem(action, abs_path, upperdir, base);
             push_memstack(holmem, memento);
-            commit(abs_path, action);
+            commit(abs_path, action, upperdir, base);
             unlink(abs_path);
         }
     }
@@ -155,12 +237,12 @@ void reap_dir(const char *dir_path, HollowMemento *holmem){
     closedir(dir);
 }
 
-//upper_path is for stat-ing files in upperdir, lower_path is for stat-ing files in lowerdir 
-Action find_action(const char *upper_path){
+//upper_path is for stat-ing files in upperdir, lower_path is for stat-ing files in lowerdir
+Action find_action(const char *upper_path, const char *upperdir, const char *base){
     size_t lower_sz = strlen(upper_path); //this will leave some extra space
     char lower_path[lower_sz];
 
-    snprintf(lower_path, lower_sz, "%s", upper_path + strlen(upperdir) - 1);
+    get_lowpath(upper_path, lower_path, lower_sz, base, upperdir);
 
     struct stat st_upper, st_lower;
     if(lstat(upper_path, &st_upper) != 0){
@@ -193,22 +275,26 @@ Action find_action(const char *upper_path){
     }
 }
 
-Memento *create_mem(Action action, const char *upper_path){
+Memento *create_mem(Action action, const char *upper_path, const char *upperdir, const char *base){
     Memento *mem = malloc(sizeof(Memento));
 
     size_t lower_sz = strlen(upper_path);
     char lower_path[lower_sz];
 
-    snprintf(lower_path, lower_sz, "%s", upper_path + strlen(upperdir) - 1);
+    get_lowpath(upper_path, lower_path, lower_sz, base, upperdir);
+
+    fprintf(stderr, "lowerpath: %s\n", lower_path);
+    fprintf(stderr, "upperpath: %s\n", upper_path);
 
     mem->path = strdup(lower_path);
     mem->action = action;
     switch(action){
         case F_CREATE:
-            break;
+            fprintf(stderr, "create mem\n");
+            return mem;
 
         case DIR_CREATE:
-            break;
+            return mem;;
 
         case F_WRITE:
         case F_DELETE:{
@@ -223,7 +309,7 @@ Memento *create_mem(Action action, const char *upper_path){
             mem->uid = st.st_uid;
             mem->gid = st.st_gid;
 
-            break;
+            return mem;;
         }
 
         case DIR_DELETE:
@@ -238,7 +324,7 @@ Memento *create_mem(Action action, const char *upper_path){
             mem->uid = st.st_uid;
             mem->gid = st.st_gid;
 
-            break;
+            return mem;
         }
 
         case ACT_INV:
@@ -248,11 +334,11 @@ Memento *create_mem(Action action, const char *upper_path){
     return NULL;
 }
 
-int commit(const char *upper_path, Action action){
+int commit(const char *upper_path, Action action, const char *upperdir, const char *base){
     size_t lower_sz = strlen(upper_path);
     char lower_path[lower_sz];
 
-    snprintf(lower_path, lower_sz, "%s", upper_path + strlen(upperdir) - 1);
+    get_lowpath(upper_path, lower_path, lower_sz, base, upperdir);
 
     struct stat st;
     if(lstat(upper_path, &st) != 0){
@@ -310,19 +396,28 @@ int commit(const char *upper_path, Action action){
     return 0;
 }
 
-void undo(){
+int undo(char **noop){
+    (void)noop;
+
     HollowMemento *holmem = ustack[utop];
 
+    fprintf(stderr, "triggered undo utop = %d, holtop = %d\n", utop, holmem->top);
     while(holmem->top >= 0){
+        fprintf(stderr, "undo loop\n");
+        fprintf(stderr, "path: %s\n", holmem->mementos[holmem->top]->path);
         undo_mem(holmem->mementos[holmem->top]);
+        holmem->top--;
     }
 
     pop_ustack();
+
+    return 0;
 }
 
 void undo_mem(Memento *mem){
     switch(mem->action){
         case F_CREATE:
+            fprintf(stderr, "%s\n", mem->path);
             unlink(mem->path);
             break;
 
@@ -408,6 +503,7 @@ void free_holmem(HollowMemento *holmem){
     }
 
     free(holmem->mementos);
+    free(holmem);
 }
 
 void free_mem(Memento *mem){
@@ -457,5 +553,34 @@ int fcopy(const char *src, const char *dest){
     close(src_fd);
     close(dest_fd);
 
+    return 0;
+}
+
+void get_lowpath(const char *up_path, char *low_path, size_t low_sz, const char *base, const char *upperdir){
+    if(strcmp(base, "/") == 0){
+        snprintf(low_path, low_sz, "%s", up_path + strlen(upperdir));
+    }
+    else{
+        snprintf(low_path, low_sz, "%s%s", base, up_path + strlen(upperdir));
+    }
+
+}
+
+int is_noise(const char *path){
+    char *ignored[] = {
+        "/.local/share/nvim/mason",
+        "/.local/share/baloo",
+        "/.local/share/Trash",
+        "/.cache",
+        "/tmp",
+        NULL
+    };
+
+    for(int i = 0; ignored[i] != NULL; i++){
+        if (strstr(path, ignored[i]) != NULL){
+            fprintf(stderr, "Noise found in %s\n", path);
+            return 1;
+        }
+    }
     return 0;
 }

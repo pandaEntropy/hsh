@@ -6,7 +6,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-#include "memento.h"
+#include "overlayrb.h"
 
 #define HSH_RD_BUFSIZE 1024
 #define HSH_TOK_BUFSIZE 64
@@ -89,7 +89,7 @@ int main(){
 
     init_sigs();
 
-    if(init_memento() != 0){
+    if(init_ovl_dirs() != 0){
         fprintf(stderr, "hsh: Failed to start\n");
         return EXIT_FAILURE;
     }
@@ -240,6 +240,12 @@ int hsh_launch(char **args){
         sigaction(SIGTSTP, &sa, NULL);
         sigaction(SIGINT, &sa, NULL);
 
+        uid_t uid = getuid();
+        gid_t gid = getgid();
+        if(init_child_ovl(uid, gid) != 0){
+            fprintf(stderr, "hsh: failed to init child ovl\n");
+        }
+
         execvp(args[0], args);
         fprintf(stderr, "hsh: %s: command not found\n", args[0]);
         exit(EXIT_FAILURE);
@@ -256,6 +262,8 @@ int hsh_launch(char **args){
         signal(SIGTTOU, SIG_IGN);
         tcsetpgrp(STDIN_FILENO, getpgid(0));
     }
+
+    reap_overlay();
 
     if(WIFEXITED(status)){
         return WEXITSTATUS(status);
@@ -518,27 +526,10 @@ int handle_and(char *block1, char *block2){
     char **args2 = parse_block(block2);
     if(args1 == NULL || args2 == NULL) return 1;
 
-    HollowMemento holmem1;
-    create_holmem(args1, &holmem1);
-
     int status = hsh_launch(args1);
 
-    if(status == 0){
-        push(holmem1);
-
-        HollowMemento holmem2;
-        create_holmem(args2, &holmem2);
-
+    if(status == 0)
         status = hsh_launch(args2);
-
-        if(status == 0) 
-            push(holmem2);
-        else
-            free_holmem(holmem2);
-    }
-    else{
-        free_holmem(holmem1);
-    }
 
     free_args(args1);
     free_args(args2);
@@ -550,27 +541,10 @@ int handle_or(char *block1, char *block2){
     char **args2 = parse_block(block2);
     if(args1 == NULL || args2 == NULL) return 1;
 
-    HollowMemento holmem1;
-    create_holmem(args1, &holmem1);
-
     int status = hsh_launch(args1);
 
-    if(status != 0){
-        free_holmem(holmem1);
-
-        HollowMemento holmem2;
-        create_holmem(args2, &holmem2);
-
+    if(status != 0)
         status = hsh_launch(args2);
-
-        if(status == 0)
-            push(holmem2);
-        else
-            free_holmem(holmem2);
-    }
-    else if(status == 0){
-        push(holmem1);
-    }
 
     free_args(args1);
     free_args(args2);
@@ -590,16 +564,7 @@ int handle_op_none(char *block){
     char **args = parse_block(block);
     if(args == NULL) return 1;
 
-    HollowMemento holmem;
-    create_holmem(args, &holmem);
-
     int status = hsh_launch(args);
-
-    if(status == 0){
-        push(holmem);
-    }
-    else
-        free_holmem(holmem);
 
     free_args(args);
     return status;
@@ -663,8 +628,6 @@ int handle_bg(char *block){
 }
 
 void hsh_cleanup(){
-    mem_cleanup();
-
     for(int i = 0; i < bg_count; i++){
         kill(-bg_jobs[i], SIGTERM);
     }
