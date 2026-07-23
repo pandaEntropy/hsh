@@ -41,16 +41,15 @@ typedef struct HollowMemento{
     size_t size;
 }HollowMemento;
 
-char *hshdir = "/hsh/";
 char trashdir[PATH_MAX];
 
-char *upperdir_root = "/hsh/upper_root";
-char *workdir_root  = "/hsh/work_root";
+char *upperdir_root = "/home/ilya/.local/share/hsh/upper_root";
+char *workdir_root  = "/home/ilya/.local/share/hsh/work_root";
 
-char *upperdir_home = "/hsh/upper_home";
-char *workdir_home  = "/hsh/work_home";
+char *upperdir_home = "/home/ilya/.local/share/hsh/upper_home";
+char *workdir_home  = "/home/ilya/.local/share/hsh/work_home";
 
-char *mergeddir = "/hsh/merged";
+char *mergeddir = "/home/ilya/.local/share/hsh/merged";
 
 HollowMemento *ustack[MAX_USTACK];
 int utop = -1;
@@ -71,6 +70,7 @@ char *trash(const char *lower_path);
 int fcopy(const char *src, const char *dest);
 void get_lowpath(const char *up_path, char *low_path, size_t low_sz, const char *base, const char *upperdir);
 int is_noise(const char *path);
+int drop_root();
 
 int init_ns(uid_t uid, gid_t gid){
     char buf[128];
@@ -136,9 +136,9 @@ int init_child_ovl(uid_t uid, gid_t gid){
         perror("hsh: failed to mount home overlay");
     }
 
-    mount("/proc", "/hsh/merged/proc", NULL, MS_BIND | MS_REC, NULL);
-    mount("/dev", "/hsh/merged/dev", NULL, MS_BIND | MS_REC, NULL);
-    mount("/sys", "/hsh/merged/sys", NULL, MS_BIND | MS_REC, NULL);
+    mount("/proc", "/home/ilya/.local/share/hsh/merged/proc", NULL, MS_BIND | MS_REC, NULL);
+    mount("/dev", "/home/ilya/.local/share/hsh/merged/dev", NULL, MS_BIND | MS_REC, NULL);
+    mount("/sys", "/home/ilya/.local/share/hsh/merged/sys", NULL, MS_BIND | MS_REC, NULL);
 
     if(chdir(mergeddir) != 0 || chroot(".") != 0){
         fprintf(stderr, "hsh: chroot failed\n");
@@ -150,9 +150,20 @@ int init_child_ovl(uid_t uid, gid_t gid){
     }
     setenv("PWD", cwd_buf, 1);
 
+    if(drop_root() != 0){
+        fprintf(stderr, "hsh: failed to drop root\n");
+        return 1;
+    }
+
     return 0;
 }
 
+/*
+ * TODO
+ * 1. Ignore undo for commands like ls by ignoring when memento top pointer is -1 (there was nothing done)
+ * 2. Clean code, remove anything unused
+ * 3. What to do with mount points like /dev or /sys ? Just bind them? But that would require iterating anda also no overlay then.
+ */
 
 int init_ovl_dirs(){
     mkdir(workdir_root, 0700);
@@ -282,9 +293,6 @@ Memento *create_mem(Action action, const char *upper_path, const char *upperdir,
     char lower_path[lower_sz];
 
     get_lowpath(upper_path, lower_path, lower_sz, base, upperdir);
-
-    fprintf(stderr, "lowerpath: %s\n", lower_path);
-    fprintf(stderr, "upperpath: %s\n", upper_path);
 
     mem->path = strdup(lower_path);
     mem->action = action;
@@ -578,9 +586,39 @@ int is_noise(const char *path){
 
     for(int i = 0; ignored[i] != NULL; i++){
         if (strstr(path, ignored[i]) != NULL){
-            fprintf(stderr, "Noise found in %s\n", path);
             return 1;
         }
     }
+    return 0;
+}
+
+int drop_root(){
+    char *uidstr = getenv("SUDO_UID");
+    if(uidstr == NULL){
+        fprintf(stderr, "hsh:  faield to get sudo uid\n");
+        return 1;
+    }
+
+    uid_t uid = strtoul(uidstr, NULL, 10);
+
+    char *gidstr = getenv("SUDO_GID");
+    if(gidstr == NULL){
+        fprintf(stderr, "hsh:  faield to get sudo gid\n");
+        return 1;
+    }
+
+    gid_t gid = strtoul(gidstr, NULL, 10);
+
+
+    if(setgid(gid) != 0){
+        perror("hsh: setgid failed");
+        return 1;
+    }
+
+    if(setuid(uid) != 0){
+        perror("hsh: setuid failed");
+        return 1;
+    }
+
     return 0;
 }
